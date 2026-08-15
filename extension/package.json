@@ -1,0 +1,223 @@
+{
+  "name": "deepseek-harness-vscode",
+  "displayName": "DeepSeek Harness",
+  "description": "Use DeepSeek Harness through an independent native VS Code agent sidebar.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "deepseek-harness-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:deepseekHarness.openChat",
+    "onCommand:deepseekHarness.configureApiKey",
+    "onCommand:deepseekHarness.newSession",
+    "onCommand:deepseekHarness.stopRunner",
+    "onCommand:deepseekHarness.prepareRunner",
+    "onCommand:deepseekHarness.verifyConnection",
+    "onCommand:deepseekHarness.selectHarnessFolder",
+    "onView:deepseekHarness.chat",
+    "onView:deepseekHarness.runtime",
+    "onView:deepseekHarness.capabilities"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "deepseekHarness.openChat",
+        "title": "DeepSeek Harness: Open Sidebar"
+      },
+      {
+        "command": "deepseekHarness.configureApiKey",
+        "title": "DeepSeek Harness: Configure API Key"
+      },
+      {
+        "command": "deepseekHarness.refreshRuntime",
+        "title": "DeepSeek Harness: Refresh Runtime Status"
+      },
+      {
+        "command": "deepseekHarness.newSession",
+        "title": "DeepSeek Harness: Start New Session"
+      },
+      {
+        "command": "deepseekHarness.stopRunner",
+        "title": "DeepSeek Harness: Stop Local Runner"
+      },
+      {
+        "command": "deepseekHarness.prepareRunner",
+        "title": "DeepSeek Harness: Prepare Local Runtime"
+      },
+      {
+        "command": "deepseekHarness.verifyConnection",
+        "title": "DeepSeek Harness: Verify DeepSeek Connection"
+      },
+      {
+        "command": "deepseekHarness.selectHarnessFolder",
+        "title": "DeepSeek Harness: Select Harness Folder"
+      },
+      {
+        "command": "deepseekHarness.refreshCapabilities",
+        "title": "DeepSeek Harness: Refresh Harness Capabilities"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deepseekHarness",
+          "title": "DeepSeek Harness",
+          "icon": "media/deepseek-harness.svg"
+        }
+      ]
+    },
+    "views": {
+      "deepseekHarness": [
+        {
+          "id": "deepseekHarness.chat",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "deepseekHarness.runtime",
+          "name": "Runtime"
+        },
+        {
+          "id": "deepseekHarness.capabilities",
+          "name": "Harness"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "deepseekHarness.runtime",
+        "contents": "[Open DeepSeek Harness Sidebar](command:deepseekHarness.openChat)\\n\\n[Configure API Key](command:deepseekHarness.configureApiKey)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "deepseekHarness.refreshRuntime",
+          "when": "view == deepseekHarness.runtime",
+          "group": "navigation"
+        },
+        {
+          "command": "deepseekHarness.refreshCapabilities",
+          "when": "view == deepseekHarness.capabilities",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DeepSeek Harness",
+      "properties": {
+        "deepseekHarness.harnessPath": {
+          "type": "string",
+          "default": "../harness",
+          "scope": "window",
+          "description": "Path to the DeepSeek Harness source or packaged runtime, relative to this extension when not absolute."
+        },
+        "deepseekHarness.runnerTransport": {
+          "type": "string",
+          "enum": [
+            "local",
+            "remote"
+          ],
+          "default": "local",
+          "scope": "window",
+          "description": "Runner transport. The desktop extension currently supports a local Harness Host sidecar."
+        },
+        "deepseekHarness.remoteRunnerUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "description": "Reserved for a future authenticated remote Runner."
+        },
+        "deepseekHarness.nodePath": {
+          "type": "string",
+          "default": "node",
+          "scope": "window",
+          "description": "Node.js executable used to start the local Harness Host sidecar."
+        },
+        "deepseekHarness.model": {
+          "type": "string",
+          "enum": [
+            "deepseek-v4-pro",
+            "deepseek-v4-flash"
+          ],
+          "default": "deepseek-v4-flash",
+          "scope": "window",
+          "description": "Model passed to the local Harness Host sidecar. The sidebar offers V4-Pro and Flash."
+        },
+        "deepseekHarness.permissionMode": {
+          "type": "string",
+          "enum": [
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "enumDescriptions": [
+            "Read files only. Harness cannot write workspace or temporary files.",
+            "Write inside the current workspace and permitted temporary directories; Harness asks before tool actions.",
+            "Allow full file access without Harness approval prompts."
+          ],
+          "default": "workspace-write",
+          "scope": "window",
+          "description": "Sandbox and approval mode passed to the local Harness Host. Changing it restarts the local Host before the next request."
+        },
+        "deepseekHarness.versionSnapshots": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Save copies of files changed by each completed Harness turn under .deepseek-harness-history in the workspace."
+        },
+        "deepseekHarness.editReview": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Show a read-only predicted diff before allowing a Harness file-write tool."
+        },
+        "deepseekHarness.inlineCompletion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Show DeepSeek FIM inline completions as editor ghost text."
+        },
+        "deepseekHarness.inlineCompletion.maxTokens": {
+          "type": "number",
+          "default": 128,
+          "minimum": 16,
+          "maximum": 512,
+          "scope": "window",
+          "description": "Maximum tokens requested for one DeepSeek inline completion."
+        },
+        "deepseekHarness.bootstrapCredentialsFile": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Optional local Harness credentials YAML file to import once into VS Code SecretStorage when no extension API key exists."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "check": "tsc --noEmit",
+    "package": "vsce package --no-dependencies --out ../deepseek-harness-vscode-0.1.0.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@types/vscode": "^1.100.0",
+    "@types/ws": "8.5.13",
+    "@vscode/vsce": "^3.6.2",
+    "esbuild": "^0.25.10",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "fflate": "0.8.2",
+    "ws": "8.18.3"
+  }
+}

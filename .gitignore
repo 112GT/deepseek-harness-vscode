@@ -1,0 +1,36 @@
+# Dependencies and build products
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+*.tsbuildinfo
+*.vsix
+*.zip
+*.log
+
+# Local workspaces and historical release outputs
+.scratch*/
+release/
+release-deepseek-only/
+release-deepseek-only-clean/
+.deepseek-harness-history/
+
+# Editors and operating systems
+.vscode/
+.vscode-test/
+.DS_Store
+Thumbs.db
+
+# Credentials and private local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+credentials*.yaml
+credentials*.yml
+settings.local.yaml
+settings.local.yml

@@ -1,0 +1,46 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  extension:
+    name: Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install extension dependencies
+        working-directory: extension
+        run: pnpm install --frozen-lockfile
+      - name: Check extension
+        working-directory: extension
+        run: pnpm run check
+      - name: Build extension
+        working-directory: extension
+        run: pnpm run build
+
+  harness:
+    name: Harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install Harness dependencies
+        working-directory: harness
+        run: pnpm install --frozen-lockfile
+      - name: Build Harness
+        working-directory: harness
+        run: pnpm run build
