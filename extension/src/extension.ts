@@ -8,6 +8,7 @@ import { WorkspaceChangeDecorationProvider, WorkspaceChangeTracker } from './wor
 import { DeepSeekInlineCompletionProvider } from './inline-completion'
 import { PrewriteReviewService } from './prewrite-review'
 import { CapabilityViewProvider } from './capability-view'
+import { CapabilitiesHotReloader } from './capabilities-hot-reload'
 import type { HarnessPreset, HarnessSkill } from './runner/runner'
 
 const API_KEY_SECRET = 'deepseekHarness.apiKey'
@@ -33,6 +34,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const runner = new HostRunner(context, locator, async () => context.secrets.get(API_KEY_SECRET), review)
   const runtimeView = new RuntimeViewProvider(locator, context.secrets, runner)
   const capabilityView = new CapabilityViewProvider(() => runner.inspectCapabilities())
+  const capabilityHotReload = new CapabilitiesHotReloader(context, locator, runner, capabilityView, output)
   const changeTracker = new WorkspaceChangeTracker()
   const changeDecorations = new WorkspaceChangeDecorationProvider(changeTracker)
   const setModel = async (model: string): Promise<void> => {
@@ -83,7 +85,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     runtimeView.refresh()
   }
 
-  context.subscriptions.push(output, locator, runner, review, runtimeView, capabilityView, changeTracker, changeDecorations, chatView, treeView, capabilitiesTreeView)
+  context.subscriptions.push(output, locator, runner, review, runtimeView, capabilityView, capabilityHotReload, changeTracker, changeDecorations, chatView, treeView, capabilitiesTreeView)
   context.subscriptions.push(vscode.window.registerFileDecorationProvider(changeDecorations))
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(review.scheme, review))
   context.subscriptions.push(vscode.languages.registerInlineCompletionItemProvider(
@@ -95,7 +97,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }))
   context.subscriptions.push(vscode.commands.registerCommand('deepseekHarness.refreshRuntime', refresh))
   context.subscriptions.push(vscode.commands.registerCommand('deepseekHarness.refreshCapabilities', async () => {
-    await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: 'Refreshing DeepSeek Harness capabilities' }, () => capabilityView.refresh())
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: 'Refreshing DeepSeek Harness capabilities' }, () => capabilityHotReload.refreshNow())
+  }))
+  context.subscriptions.push(vscode.commands.registerCommand('deepseekHarness.toggleCapabilitiesAutoRefresh', async () => {
+    await capabilityHotReload.toggle()
   }))
   context.subscriptions.push(vscode.commands.registerCommand('deepseekHarness.openHarnessSettings', async () => {
     try {
@@ -119,7 +124,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!isHarnessPreset(preset) || preset.broken !== undefined) return
     try {
       await chatView.startWithPreset(preset.id, preset.name)
-      await capabilityView.refresh()
+      await capabilityHotReload.refreshNow()
     } catch (error) {
       void vscode.window.showErrorMessage(`Unable to select agent preset: ${errorMessage(error)}`)
     }
@@ -127,7 +132,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(vscode.commands.registerCommand('deepseekHarness.manageAgentPresets', async () => {
     try {
       await manageAgentPresets(runner, chatView)
-      await capabilityView.refresh()
+      await capabilityHotReload.refreshNow()
     } catch (error) {
       void vscode.window.showErrorMessage(`Unable to manage agent presets: ${errorMessage(error)}`)
     }
@@ -168,6 +173,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     refresh()
   }))
 
+  await capabilityHotReload.start()
   const source = await locator.inspect()
   output.appendLine(`Harness source: ${source.state}${source.version === undefined ? '' : ` (${source.version})`}`)
 }

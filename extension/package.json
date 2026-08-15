@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness",
   "description": "Use DeepSeek Harness through an independent native VS Code agent sidebar.",
-  "version": "0.1.0",
+  "version": "0.2.0-dev.1",
   "private": true,
   "publisher": "deepseek-harness-local",
   "license": "MIT",
@@ -28,6 +28,7 @@
     "onCommand:deepseekHarness.stopRunner",
     "onCommand:deepseekHarness.prepareRunner",
     "onCommand:deepseekHarness.verifyConnection",
+    "onCommand:deepseekHarness.toggleCapabilitiesAutoRefresh",
     "onCommand:deepseekHarness.selectHarnessFolder",
     "onView:deepseekHarness.chat",
     "onView:deepseekHarness.runtime",
@@ -71,6 +72,10 @@
       {
         "command": "deepseekHarness.refreshCapabilities",
         "title": "DeepSeek Harness: Refresh Harness Capabilities"
+      },
+      {
+        "command": "deepseekHarness.toggleCapabilitiesAutoRefresh",
+        "title": "DeepSeek Harness: Toggle Capability Auto Refresh"
       }
     ],
     "viewsContainers": {
@@ -116,6 +121,11 @@
           "command": "deepseekHarness.refreshCapabilities",
           "when": "view == deepseekHarness.capabilities",
           "group": "navigation"
+        },
+        {
+          "command": "deepseekHarness.toggleCapabilitiesAutoRefresh",
+          "when": "view == deepseekHarness.capabilities",
+          "group": "navigation@2"
         }
       ]
     },
@@ -159,6 +169,20 @@
           "default": "deepseek-v4-flash",
           "scope": "window",
           "description": "Model passed to the local Harness Host sidecar. The sidebar offers V4-Pro and Flash."
+        },
+        "deepseekHarness.hotReload.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Watch Harness Skills, agent presets and settings.yaml, then refresh the Harness panel after the current task reaches a safe point."
+        },
+        "deepseekHarness.hotReload.debounceMs": {
+          "type": "number",
+          "default": 750,
+          "minimum": 100,
+          "maximum": 10000,
+          "scope": "window",
+          "description": "Delay before a changed Harness capability file triggers an automatic panel refresh."
         },
         "deepseekHarness.permissionMode": {
           "type": "string",
@@ -214,7 +238,7 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "check": "tsc --noEmit",
-    "package": "vsce package --no-dependencies --out ../deepseek-harness-vscode-0.1.0.vsix"
+    "package": "vsce package --no-dependencies --out ../deepseek-harness-vscode-0.2.0-dev.1.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

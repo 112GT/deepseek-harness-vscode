@@ -53,6 +53,21 @@ The first setup downloads dependencies and builds the local Harness runtime. Lat
 - Enable DeepSeek Harness: Version Snapshots to save turn snapshots under .deepseek-harness-history in the workspace.
 - **Stop** cancels the active request. **DeepSeek Harness: Stop Local Runner** stops the local sidecar process.
 
+## Capability hot updates
+
+The Harness view contains a **Hot update** group with an automatic-refresh switch, an immediate refresh action, watched-source list, pending-change indicator, and the last update summary.
+
+When enabled, it watches:
+
+- Workspace Skills under .agents/skills
+- User Skills in the private local Harness home
+- Bundled Skills in the selected Harness runtime
+- The local Harness settings.yaml file, including provider and agent-preset configuration
+
+Changed capabilities are re-read without reinstalling the extension. A task already running retains its original Skill set; changes are applied after the task reaches a safe point, normally before the next turn.
+
+Extension code, a VSIX package, compiled Harness code, and process environment credentials are not hot-swapped. Those require a Runner restart, VS Code reload, or a new extension version as appropriate.
+
 ## Build from source
 
     cd extension

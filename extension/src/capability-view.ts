@@ -1,7 +1,21 @@
 import * as vscode from 'vscode'
+import { capabilityDelta } from './capability-delta'
 import type { HarnessCapabilitiesSnapshot, HarnessPreset, HarnessSkill } from './runner/runner'
 
 type CapabilityNode = GroupNode | LeafNode
+
+export interface HotReloadState {
+  readonly enabled: boolean
+  readonly watchedSources: readonly string[]
+  readonly pendingAreas: readonly string[]
+  readonly lastUpdated?: string
+  readonly detail: string
+}
+
+export interface CapabilityRefreshResult {
+  readonly ok: boolean
+  readonly detail: string
+}
 
 interface GroupNode {
   readonly kind: 'group'
@@ -28,6 +42,12 @@ export class CapabilityViewProvider implements vscode.TreeDataProvider<Capabilit
   readonly onDidChangeTreeData = this.changed.event
   private snapshot: HarnessCapabilitiesSnapshot | undefined
   private error: string | undefined
+  private hotReload: HotReloadState = {
+    enabled: true,
+    watchedSources: [],
+    pendingAreas: [],
+    detail: 'Starting capability watchers…',
+  }
 
   constructor(private readonly load: () => Promise<HarnessCapabilitiesSnapshot>) {}
 
@@ -45,19 +65,29 @@ export class CapabilityViewProvider implements vscode.TreeDataProvider<Capabilit
     if (node?.kind === 'group') return [...node.children]
     if (node !== undefined) return []
     const controls = controlNodes()
-    if (this.error !== undefined) return [...controls, { kind: 'leaf', label: 'Unable to load capabilities', description: this.error, icon: 'error' }]
-    if (this.snapshot === undefined) return [...controls, { kind: 'leaf', label: 'Refresh Harness now', description: 'Load skills, providers, presets and sub-agents.', icon: 'info' }]
-    return [...controls, ...groups(this.snapshot)]
+    const hotReload = hotReloadGroup(this.hotReload)
+    if (this.error !== undefined) return [hotReload, ...controls, { kind: 'leaf', label: 'Unable to load capabilities', description: this.error, icon: 'error' }]
+    if (this.snapshot === undefined) return [hotReload, ...controls, { kind: 'leaf', label: 'Refresh Harness now', description: 'Load skills, providers, presets and sub-agents.', icon: 'info' }]
+    return [hotReload, ...controls, ...groups(this.snapshot)]
   }
 
-  async refresh(): Promise<void> {
+  async refresh(): Promise<CapabilityRefreshResult> {
+    const previous = this.snapshot
     this.error = undefined
     try {
       this.snapshot = await this.load()
+      return { ok: true, detail: capabilityDelta(previous, this.snapshot) }
     } catch (error) {
       this.snapshot = undefined
       this.error = error instanceof Error ? error.message : String(error)
+      return { ok: false, detail: 'Unable to refresh capabilities: ' + this.error }
+    } finally {
+      this.changed.fire(undefined)
     }
+  }
+
+  setHotReloadState(state: HotReloadState): void {
+    this.hotReload = state
     this.changed.fire(undefined)
   }
 
@@ -65,6 +95,31 @@ export class CapabilityViewProvider implements vscode.TreeDataProvider<Capabilit
     this.changed.dispose()
   }
 
+}
+
+function hotReloadGroup(state: HotReloadState): GroupNode {
+  const sources = state.watchedSources.length === 0 ? 'No sources watched.' : state.watchedSources.join(' · ')
+  const pending = state.pendingAreas.length === 0 ? 'No pending file changes.' : 'Pending: ' + state.pendingAreas.join(', ')
+  return group('Hot update', [
+    {
+      kind: 'leaf',
+      label: state.enabled ? 'Auto refresh: On' : 'Auto refresh: Off',
+      description: state.enabled ? 'Watch capability files and refresh between tasks. Click to turn off.' : 'Click to enable file watching.',
+      icon: state.enabled ? 'eye' : 'eye-closed',
+      command: { command: 'deepseekHarness.toggleCapabilitiesAutoRefresh', title: 'Toggle Harness capability auto refresh' },
+    },
+    {
+      kind: 'leaf',
+      label: 'Refresh now',
+      description: 'Query the current Host immediately.',
+      icon: 'refresh',
+      command: { command: 'deepseekHarness.refreshCapabilities', title: 'Refresh Harness capabilities' },
+    },
+    { kind: 'leaf', label: 'Watched sources', description: sources, icon: 'folder-library' },
+    { kind: 'leaf', label: 'Last update', description: state.lastUpdated === undefined ? state.detail : state.lastUpdated + ' — ' + state.detail, icon: 'history' },
+    { kind: 'leaf', label: 'Pending changes', description: pending, icon: state.pendingAreas.length === 0 ? 'check' : 'sync~spin' },
+    { kind: 'leaf', label: 'Safe point', description: 'A running task keeps its current Skills. Detected changes apply after it finishes.', icon: 'shield' },
+  ])
 }
 
 function controlNodes(): readonly LeafNode[] {

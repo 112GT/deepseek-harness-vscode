@@ -53,6 +53,21 @@
 - 打开 DeepSeek Harness: Version Snapshots 后，每轮文件快照会存到项目目录的 .deepseek-harness-history/。
 - 对话中的 **Stop** 只中断当前请求；**DeepSeek Harness: Stop Local Runner** 会关闭本地侧车进程。
 
+## 能力热更新
+
+Harness 面板新增 **Hot update** 分组，提供自动刷新开关、立即刷新、监听源列表、待处理变更和最后更新摘要。
+
+打开自动刷新后，插件会监听：
+
+- 工作区 .agents/skills 中的 Skills
+- 私有本地 Harness 主目录中的用户 Skills
+- 已选择 Harness 运行时自带的 Skills
+- 本地 Harness 的 settings.yaml，其中包括模型提供方和 Agent Preset 配置
+
+这些能力文件变更后无需重装插件。正在运行的任务会保留开始时的 Skill 集合；变更会在任务到达安全点后应用，通常是下一轮开始前。
+
+扩展 TypeScript 代码、VSIX 安装包、已编译的 Harness 代码和进程环境中的密钥不能在线替换；它们分别需要重启 Runner、重载 VS Code 或安装新版本。
+
 ## 从源码构建
 
     cd extension
