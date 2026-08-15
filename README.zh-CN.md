@@ -59,8 +59,9 @@ Harness 面板新增 **Hot update** 分组，提供自动刷新开关、立即�
 
 打开自动刷新后，插件会监听：
 
-- 工作区 .agents/skills 中的 Skills
-- 私有本地 Harness 主目录中的用户 Skills
+- 工作区 .agents/skills 和 .dsh/skills 中的 Skills
+- 私有本地 Harness 主目录 .agents/skills 和 .dsh/skills 中的用户 Skills
+- 私有本地 Harness 主目录 .agent-presets 中的用户 Agent Preset
 - 已选择 Harness 运行时自带的 Skills
 - 本地 Harness 的 settings.yaml，其中包括模型提供方和 Agent Preset 配置
 

@@ -70,15 +70,16 @@ export class CapabilitiesHotReloader implements vscode.Disposable {
     }
 
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      this.watch(new vscode.RelativePattern(folder, '.agents/skills/**'), 'Workspace Skills', 'skills')
+      this.watchSkillRoots(folder, 'Workspace Skills')
     }
 
     const hostHome = vscode.Uri.joinPath(this.context.globalStorageUri, 'host-home')
-    this.watch(new vscode.RelativePattern(hostHome, '.agents/skills/**'), 'User Skills', 'skills')
+    this.watchSkillRoots(hostHome, 'User Skills')
+    this.watch(new vscode.RelativePattern(hostHome, '.agent-presets/**'), 'User presets', 'presets')
     this.watch(new vscode.RelativePattern(hostHome, 'settings.yaml'), 'Harness settings.yaml', 'settings')
 
     const source = await this.locator.inspect()
-    if (source.state === 'ready') this.watch(new vscode.RelativePattern(source.root, '.agents/skills/**'), 'Bundled Skills', 'skills')
+    if (source.state === 'ready') this.watchSkillRoots(source.root, 'Bundled Skills')
 
     this.lastDetail = this.watchedSources.length === 0
       ? 'No workspace is open. User Skills and Harness settings remain watched.'
@@ -91,7 +92,12 @@ export class CapabilitiesHotReloader implements vscode.Disposable {
     const changed = (): void => this.detect(area, label)
     this.watchers.push(watcher)
     this.watcherListeners.push(watcher.onDidCreate(changed), watcher.onDidChange(changed), watcher.onDidDelete(changed))
-    this.watchedSources = [...this.watchedSources, label]
+    if (!this.watchedSources.includes(label)) this.watchedSources = [...this.watchedSources, label]
+  }
+
+  private watchSkillRoots(root: vscode.Uri | vscode.WorkspaceFolder, label: string): void {
+    this.watch(new vscode.RelativePattern(root, '.agents/skills/**'), label, 'skills')
+    this.watch(new vscode.RelativePattern(root, '.dsh/skills/**'), label, 'skills')
   }
 
   private detect(area: ReloadArea, label: string): void {

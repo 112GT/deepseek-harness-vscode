@@ -59,8 +59,9 @@ The Harness view contains a **Hot update** group with an automatic-refresh switc
 
 When enabled, it watches:
 
-- Workspace Skills under .agents/skills
-- User Skills in the private local Harness home
+- Workspace Skills under .agents/skills and .dsh/skills
+- User Skills in the private local Harness home, under .agents/skills and .dsh/skills
+- User-authored agent presets under the private local Harness home .agent-presets directory
 - Bundled Skills in the selected Harness runtime
 - The local Harness settings.yaml file, including provider and agent-preset configuration
 
