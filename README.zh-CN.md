@@ -76,15 +76,6 @@
 
 生成的压缩包、VSIX、依赖目录、临时测试目录、日志、密钥和本地聊天快照都不会进入 Git。
 
-## 发布流程
-
-1. 执行上面的验证与构建命令。
-2. 从经过审计的发布构建生成便携压缩包；不得包含任何依赖目录。
-3. 只将最终压缩包与其 SHA-256 校验值上传到 GitHub Release。
-4. 不得上传 .env、API Key、VS Code SecretStorage、node_modules 或开发临时目录。
-
-当前便携包只包含 DeepSeek 运行路径；不会下载、启动或调用 Codex、Claude Code 或其 SDK。
-
 ## 许可证
 
 内置的上游 DeepSeek Harness 源码采用 MIT 许可证；本集成也采用 [MIT License](LICENSE)。

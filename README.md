@@ -76,15 +76,6 @@ For development, open extension/ in VS Code and run the **Run Extension** launch
 
 Generated archives, VSIX files, dependency directories, scratch workspaces, logs, keys, and local chat snapshots are intentionally excluded from Git.
 
-## Publishing a release
-
-1. Run the verification commands above.
-2. Produce the portable archive from an audited release build; do not include any dependency directory.
-3. Upload only the final archive and its SHA-256 checksum to a GitHub Release.
-4. Never publish .env files, API keys, VS Code SecretStorage data, node_modules, or development scratch directories.
-
-The current portable package contains only the DeepSeek runtime path. It does not download, start, or invoke Codex, Claude Code, or their SDKs.
-
 ## License
 
 The bundled upstream DeepSeek Harness source is MIT licensed. This integration is also released under the [MIT License](LICENSE).
