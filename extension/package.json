@@ -4,7 +4,7 @@
   "description": "Use DeepSeek Harness through an independent native VS Code agent sidebar.",
   "version": "0.2.1",
   "private": true,
-  "publisher": "deepseek-harness-local",
+  "publisher": "GT112",
   "license": "MIT",
   "repository": {
     "type": "git",
