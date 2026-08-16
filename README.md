@@ -52,17 +52,6 @@ It does **not** include API keys, VS Code SecretStorage, local Harness profiles,
 
 The first setup downloads dependencies and builds the local Harness runtime. Later use does not require running the setup script again.
 
-## Daily use
-
-- Use the composer’s context control to attach a selection, file, Problems, or external material. Every attachment can be removed before sending.
-- Select **DeepSeek V4 Pro** or **DeepSeek V4 Flash** from the model dropdown. Its final item opens provider setup for OpenAI, Claude, Gemini, and OpenAI-compatible endpoints (for example Qwen, Kimi, GLM, MiniMax, OpenRouter, or a self-hosted gateway).
-- Provider keys stay in VS Code SecretStorage. The local Harness `settings.yaml` contains only provider names, endpoints, models, and environment-variable references; changing a provider restarts the local Runner before the next request.
-- Prefer **Workspace write** for normal coding. **All access** allows unrestricted file access and disables Harness approval prompts.
-- Review the change card under each completed response. Click its line count to open the real edited file; use the per-file revert action when needed.
-- Enable DeepSeek Harness: Version Snapshots to save turn snapshots under .deepseek-harness-history in the workspace.
-- **Local Runner** starts the already-built sidecar. **Prepare Local Runtime** is only for a new/unbuilt Harness source; **Stop** cancels the active request.
-- **Current Problems** means VS Code diagnostics (errors and warnings) for the active editor file, not the entire workspace. **Current terminal output** can attach commands/output captured after extension activation when shell integration is available.
-
 ## Capability hot updates
 
 The Harness view contains a **Hot update** group with an automatic-refresh switch, an immediate refresh action, watched-source list, pending-change indicator, and the last update summary.

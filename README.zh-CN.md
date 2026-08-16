@@ -52,17 +52,6 @@ v0.2 继续沿用 v0.1 的便携包结构：压缩包内包含 VSIX、仅 DeepSe
 
 首次初始化会下载依赖并构建本地 Harness 运行时，耗时取决于网络；之后正常使用无需重复执行初始化脚本。
 
-## 日常使用
-
-- 使用输入框中的上下文选项附加选区、文件、Problems 或外部资料；每个附件在发送前都能删除。
-- 从模型下拉列表选择 **DeepSeek V4 Pro** 或 **DeepSeek V4 Flash**；下拉菜单最后一项可进入提供方设置，接入 OpenAI、Claude、Gemini 或 OpenAI-compatible 端点（例如 Qwen、Kimi、GLM、MiniMax、OpenRouter、自建网关）。
-- 提供方密钥只保存到 VS Code SecretStorage。本地 Harness 的 `settings.yaml` 只保存提供方、端点、模型和环境变量引用；更换提供方会在下一次请求前重启本地 Runner。
-- 一般编程建议使用 **Workspace write**。**All access** 允许不受限制的文件访问，并会关闭 Harness 的审批提示。
-- 每次任务完成后，在对话下方查看变更卡片；点击行数可跳转到真实源文件；需要时可逐文件撤销。
-- 打开 DeepSeek Harness: Version Snapshots 后，每轮文件快照会存到项目目录的 .deepseek-harness-history/。
-- **Local Runner** 会启动已构建的本地侧车；只有全新或未构建的 Harness 源码才需要 **Prepare Local Runtime**。**Stop** 只中断当前请求。
-- **当前文件 Problems** 指 VS Code 为当前编辑器文件提供的错误和警告，并非整个工作区。**当前终端输出**只会附加扩展启动后、Shell Integration 可用时捕获的命令与输出。
-
 ## 能力热更新
 
 Harness 面板新增 **Hot update** 分组，提供自动刷新开关、立即刷新、监听源列表、待处理变更和最后更新摘要。
