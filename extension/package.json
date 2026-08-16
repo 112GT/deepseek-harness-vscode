@@ -1,8 +1,8 @@
 {
-  "name": "deepseek-harness-vscode",
-  "displayName": "DeepSeek Harness",
+  "name": "dsh-for-vscode-gt112",
+  "displayName": "DSH Agent Sidebar GT112",
   "description": "Use DeepSeek Harness through an independent native VS Code agent sidebar.",
-  "version": "0.2.1",
+  "version": "0.2.6",
   "private": true,
   "publisher": "GT112",
   "license": "MIT",
@@ -261,7 +261,7 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "check": "tsc --noEmit",
-    "package": "vsce package --no-dependencies --out ../deepseek-harness-vscode-0.2.1.vsix"
+    "package": "vsce package --no-dependencies --out ../dsh-for-vscode-gt112-0.2.6.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
