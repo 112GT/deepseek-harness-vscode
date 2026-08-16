@@ -25,6 +25,44 @@ An independent VS Code sidebar for [DeepSeek Harness](https://github.com/deepsee
 - Node.js 22.19+ or 24+ with Corepack
 - An API key supplied by each user on their own computer for the provider they choose
 
+## Three ways to get started
+
+### 1. Install from the VS Code Marketplace
+
+1. Open the VS Code Extensions view and search for **DSH Agent Sidebar GT112**.
+2. Install the extension and reload VS Code.
+3. Click the **DeepSeek Harness** Activity Bar icon.
+4. Run **DeepSeek Harness: Select Harness Folder** and choose a local folder containing the Harness source and its `package.json`.
+5. Open **Manage Model Providers**, configure a provider and API key, then start a new session.
+
+The Marketplace extension does not bundle the Harness source. Download this repository or the upstream Harness source first, then select its `harness/` directory.
+
+### 2. Install a VSIX package
+
+1. Download a `.vsix` release from GitHub Releases.
+2. In VS Code, run **Extensions: Install from VSIX...** and select the file.
+3. Reload VS Code, select the `harness/` folder, and configure the provider API key as described above.
+
+### 3. Build and run from source
+
+Clone the repository, then build the Harness runtime:
+
+    git clone https://github.com/112GT/deepseek-harness-vscode.git
+    cd deepseek-harness-vscode/harness
+    corepack enable
+    corepack pnpm install --frozen-lockfile
+    corepack pnpm run build
+
+Build the VS Code extension:
+
+    cd ../extension
+    corepack pnpm install
+    corepack pnpm run check
+    corepack pnpm run build
+    corepack pnpm run package
+
+Install the generated `.vsix` from `../dsh-for-vscode-gt112-<version>.vsix`, select the repository's `harness/` folder, configure a provider, and start a session. The first request may download or prepare additional runtime dependencies.
+
 ## Portable release scope
 
 The v0.2 portable update follows the v0.1 release layout: the archive contains the VSIX, the DeepSeek-only Harness source, and the Windows/Linux/macOS setup scripts. It starts without third-party Harness plugins.

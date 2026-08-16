@@ -25,6 +25,44 @@
 - Node.js 22.19+ 或 24+，并包含 Corepack
 - 每位用户在自己的电脑上为所选模型提供方填写自己的 API Key
 
+## 三种开始方式
+
+### 1. 从 VS Code 插件市场安装
+
+1. 打开 VS Code 扩展视图，搜索 **DSH Agent Sidebar GT112**。
+2. 安装插件并重载 VS Code。
+3. 点击 Activity Bar 中的 **DeepSeek Harness** 图标。
+4. 执行 **DeepSeek Harness: Select Harness Folder**，选择包含 Harness 源码和 `package.json` 的本地目录。
+5. 打开 **Manage Model Providers**，配置模型提供方和 API Key，然后新建会话。
+
+Marketplace 插件不内置 Harness 源码。请先下载本仓库或上游 Harness 源码，再选择其中的 `harness/` 文件夹。
+
+### 2. 安装 VSIX 发布包
+
+1. 从 GitHub Releases 下载 `.vsix` 文件。
+2. 在 VS Code 中执行 **Extensions: Install from VSIX...**，选择该文件。
+3. 重载 VS Code，选择 `harness/` 文件夹，并按上面的步骤配置模型提供方和 API Key。
+
+### 3. 从 GitHub 源码构建运行
+
+先克隆仓库并构建 Harness 运行时：
+
+    git clone https://github.com/112GT/deepseek-harness-vscode.git
+    cd deepseek-harness-vscode/harness
+    corepack enable
+    corepack pnpm install --frozen-lockfile
+    corepack pnpm run build
+
+再构建 VS Code 插件：
+
+    cd ../extension
+    corepack pnpm install
+    corepack pnpm run check
+    corepack pnpm run build
+    corepack pnpm run package
+
+在 VS Code 中安装生成的 `../dsh-for-vscode-gt112-<version>.vsix`，选择仓库中的 `harness/` 文件夹，配置模型提供方后新建会话。首次请求可能会下载或准备额外的运行时依赖。
+
 ## 便携发布包范围
 
 v0.2 继续沿用 v0.1 的便携包结构：压缩包内包含 VSIX、仅 DeepSeek 的 Harness 源码，以及 Windows/Linux/macOS 初始化脚本；默认不预装任何第三方 Harness 插件。
