@@ -100,7 +100,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     new DeepSeekInlineCompletionProvider(async () => context.secrets.get(DEEPSEEK_API_KEY_SECRET)),
   ))
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('deepseekHarness.chat', chatView, {
-    webviewOptions: { retainContextWhenHidden: true },
+    // Recreate the DOM when the view is shown again; retained Webviews can
+    // keep controls visible after their old extension-host message port dies.
+    webviewOptions: { retainContextWhenHidden: false },
   }))
   context.subscriptions.push(vscode.commands.registerCommand('deepseekHarness.refreshRuntime', refresh))
   context.subscriptions.push(vscode.commands.registerCommand('deepseekHarness.refreshCapabilities', async () => {
