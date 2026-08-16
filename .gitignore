@@ -11,6 +11,7 @@ coverage/
 
 # Local workspaces and historical release outputs
 .scratch*/
+.test-fixtures/
 release/
 release-deepseek-only/
 release-deepseek-only-clean/

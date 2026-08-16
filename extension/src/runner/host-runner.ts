@@ -6,8 +6,9 @@ import * as vscode from 'vscode'
 import type { PromptAttachment, RunnerEvent } from './protocol'
 import type { HarnessRunnerStatus } from './harness-runner'
 import type { HarnessSourceLocator, HarnessSourceStatus } from './source-locator'
-import type { AgentRunner, HarnessCapabilitiesSnapshot, HarnessPreset, HarnessSkill, RunnerHistoryEntry, RunnerSessionSummary } from './runner'
+import type { AgentRunner, HarnessCapabilitiesSnapshot, HarnessPreset, HarnessSkill, RunnerCommandResult, RunnerHistoryEntry, RunnerSessionSummary } from './runner'
 import { PrewriteReviewService } from '../prewrite-review'
+import type { ModelSelection } from '../provider-config'
 
 const CLI_RUNTIME = ['apps', 'cli', 'lib', 'bin.js'] as const
 const SIDECAR_READY_TIMEOUT_MS = 30_000
@@ -66,7 +67,9 @@ export class HostRunner implements AgentRunner {
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly locator: HarnessSourceLocator,
-    private readonly apiKey: () => Promise<string | undefined>,
+    private readonly providerEnvironment: () => Promise<NodeJS.ProcessEnv>,
+    private readonly selectedModel: () => ModelSelection,
+    private readonly selectedCredentialConfigured: () => Promise<boolean>,
     private readonly review: PrewriteReviewService,
   ) {}
 
@@ -111,18 +114,42 @@ export class HostRunner implements AgentRunner {
     await this.call('session.cancel', { sessionId: this.activeSessionId })
   }
 
-  /** Verifies the configured DeepSeek route without surfacing a probe turn in the chat sidebar. */
+  /** Runs Harness's built-in /compact command without adding a user chat message. */
+  async compactContext(): Promise<RunnerCommandResult> {
+    if (this.status.state === 'running') throw new Error('Wait for the current Harness turn to finish before compressing context.')
+    await this.start()
+    await this.ensureSession()
+    this.setStatus('starting', 'Compressing older conversation context.', this.activeSessionId)
+    try {
+      const response = record(await this.call('session.prompt', {
+        sessionId: this.activeSessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: '/compact' }],
+      }))
+      const command = record(response?.command)
+      if (command?.kind !== 'success') throw new Error('The local Harness Host did not execute /compact as a command.')
+      const text = string(command.text) ?? 'Conversation context compressed.'
+      this.setStatus('ready', text, this.activeSessionId)
+      return { text }
+    } catch (error) {
+      const message = errorMessage(error)
+      this.setStatus('error', message, this.activeSessionId)
+      throw error
+    }
+  }
+
+  /** Verifies the configured model route without surfacing a probe turn in the chat sidebar. */
   async verifyConnection(): Promise<void> {
-    if (this.status.state === 'running') throw new Error('Wait for the current Harness turn to finish before verifying the DeepSeek connection.')
+    if (this.status.state === 'running') throw new Error('Wait for the current Harness turn to finish before verifying the model connection.')
     await this.start()
     const sessionId = randomUUID()
     await this.call('session.create', { sessionId, cwd: this.workspaceFolder() })
-    const model = vscode.workspace.getConfiguration('deepseekHarness').get<string>('model', 'deepseek-v4-flash').trim() || 'deepseek-v4-flash'
-    await this.call('session.selectModel', { sessionId, provider: 'deepseek-official', model })
+    const selection = this.selectedModel()
+    await this.call('session.selectModel', { sessionId, provider: selection.provider, model: selection.model, ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }) })
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         void this.call('session.cancel', { sessionId }).catch(() => undefined)
-        this.settleProbe(new Error('Timed out while waiting for DeepSeek to answer the connection check.'))
+        this.settleProbe(new Error('Timed out while waiting for the configured model to answer the connection check.'))
       }, 60_000)
       this.probe = { sessionId, output: '', resolve, reject, timeout }
       void this.call('session.prompt', {
@@ -172,6 +199,12 @@ export class HostRunner implements AgentRunner {
     }
   }
 
+  /** Starts an already-built local Host without reinstalling or rebuilding Harness. */
+  async startLocalHost(): Promise<void> {
+    if (this.status.state === 'running') throw new Error('Wait for the current Harness turn to finish before starting the local Host.')
+    await this.start()
+  }
+
   async listSessions(): Promise<readonly RunnerSessionSummary[]> {
     await this.start()
     const value = record(await this.call('session.list', {}))
@@ -180,6 +213,10 @@ export class HostRunner implements AgentRunner {
       const session = record(raw)
       const id = string(session?.sessionId ?? session?.id)
       if (id === undefined) return []
+      const cwd = string(session?.cwd)
+      // session.list is global to the local Host. A sidebar must never offer a
+      // conversation created for another VS Code workspace.
+      if (cwd === undefined || !sameWorkspace(cwd, this.workspaceFolder())) return []
       const projection = record(session?.projection ?? session?.projections)
       const values = record(projection?.values)
       const title = string(session?.title) ?? string(values?.title) ?? string(session?.agentPreset) ?? `Session ${id.slice(0, 8)}`
@@ -277,6 +314,11 @@ export class HostRunner implements AgentRunner {
     }
   }
 
+  async removePreset(id: string): Promise<void> {
+    await this.start()
+    await this.call('agentPreset.remove', { agentPreset: id })
+  }
+
   async openHarnessSettings(): Promise<void> {
     const home = vscode.Uri.file(path.join(this.context.globalStorageUri.fsPath, 'host-home'))
     await vscode.workspace.fs.createDirectory(home)
@@ -287,6 +329,27 @@ export class HostRunner implements AgentRunner {
       await vscode.workspace.fs.writeFile(file, new TextEncoder().encode('# DeepSeek Harness user settings\n'))
     }
     await vscode.window.showTextDocument(file, { preview: false })
+  }
+
+  /** Lists externally installed package bundles in this sidecar's web profile. */
+  async listProfilePlugins(): Promise<readonly string[]> {
+    const manifest = vscode.Uri.file(path.join(this.context.globalStorageUri.fsPath, 'host-home', 'profiles', 'web', 'package.json'))
+    try {
+      const parsed = record(JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(manifest))))
+      return Object.keys(record(parsed?.dependencies) ?? {}).sort((left, right) => left.localeCompare(right))
+    } catch {
+      return []
+    }
+  }
+
+  /** Installs a verified package into the sidecar's web profile and stops the old composition. */
+  async installProfilePlugin(spec: string): Promise<void> {
+    await this.runProfilePlugin('add', profilePackageSpec(spec))
+  }
+
+  /** Removes one external package bundle from the sidecar's web profile. */
+  async removeProfilePlugin(packageName: string): Promise<void> {
+    await this.runProfilePlugin('remove', profilePackageName(packageName))
   }
 
   dispose(): void {
@@ -301,8 +364,9 @@ export class HostRunner implements AgentRunner {
       throw new Error('Remote Runner is not implemented yet. Select the local Runner in Settings.')
     }
     const source = await this.requireSource()
-    const apiKey = await this.apiKey()
-    if (apiKey === undefined) throw new Error('Configure a DeepSeek API key before starting the local Harness Host.')
+    const providerEnvironment = await this.providerEnvironment()
+    const selection = this.selectedModel()
+    if (!await this.selectedCredentialConfigured()) throw new Error(`Configure the API key for ${selection.provider}/${selection.model} before starting the local Harness Host.`)
     const entry = path.join(source.root.fsPath, ...CLI_RUNTIME)
     await requireFile(entry, 'The Harness Host is not built yet. Run “DeepSeek Harness: Prepare Local Runtime”.')
     const home = path.join(this.context.globalStorageUri.fsPath, 'host-home')
@@ -313,7 +377,7 @@ export class HostRunner implements AgentRunner {
       cwd: this.workspaceFolder(),
       env: {
         ...process.env,
-        DEEPSEEK_API_KEY: apiKey,
+        ...providerEnvironment,
         DSH_HOME: home,
         DSH_PERMISSION_MODE: permissionMode(),
       },
@@ -358,6 +422,26 @@ export class HostRunner implements AgentRunner {
     }
   }
 
+  private async runProfilePlugin(operation: 'add' | 'remove', argument: string): Promise<void> {
+    if (this.status.state === 'running') throw new Error('Wait for the current Harness turn to finish before changing external plugins.')
+    if (this.child !== undefined) await this.stop()
+    const source = await this.requireSource()
+    const entry = path.join(source.root.fsPath, ...CLI_RUNTIME)
+    await requireFile(entry, 'The Harness Host is not built yet. Run “DeepSeek Harness: Prepare Local Runtime”.')
+    const home = path.join(this.context.globalStorageUri.fsPath, 'host-home')
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(home))
+    this.setStatus('starting', `${operation === 'add' ? 'Installing' : 'Removing'} Harness profile plugin.`, this.activeSessionId)
+    try {
+      const node = vscode.workspace.getConfiguration('deepseekHarness').get<string>('nodePath', 'node').trim() || 'node'
+      await runCommand(node, [entry, 'plugin', '--profile', 'web', operation, argument], source.root.fsPath, { DSH_HOME: home })
+      this.setStatus('stopped', `Harness profile plugin ${operation === 'add' ? 'installed' : 'removed'}. Start a new task to load the updated profile.`, this.activeSessionId)
+    } catch (error) {
+      const message = errorMessage(error)
+      this.setStatus('error', message, this.activeSessionId)
+      throw error
+    }
+  }
+
   private async ensureSession(): Promise<void> {
     try {
       await this.call('session.create', {
@@ -370,14 +454,14 @@ export class HostRunner implements AgentRunner {
     }
   }
 
-  /** Applies the user-selected DeepSeek route through the Host model API. */
+  /** Applies the user-selected provider route through the Host model API. */
   private async applyConfiguredModel(): Promise<void> {
-    const model = vscode.workspace.getConfiguration('deepseekHarness').get<string>('model', 'deepseek-v4-flash').trim()
-    if (model.length === 0) return
+    const selection = this.selectedModel()
     await this.call('session.selectModel', {
       sessionId: this.activeSessionId,
-      provider: 'deepseek-official',
-      model,
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
     })
   }
 
@@ -725,6 +809,14 @@ function string(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
+function sameWorkspace(left: string, right: string): boolean {
+  const normalize = (value: string): string => {
+    const resolved = path.resolve(value)
+    return process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved
+  }
+  return normalize(left) === normalize(right)
+}
+
 function numeric(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
@@ -811,9 +903,16 @@ async function enableCorepack(cwd: string): Promise<void> {
   await runCommand(corepackCommand(), ['enable'], cwd)
 }
 
-function runCommand(command: string, args: readonly string[], cwd: string): Promise<void> {
+function runCommand(command: string, args: readonly string[], cwd: string, environment?: NodeJS.ProcessEnv): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, [...args], { cwd, env: corepackEnvironment(), stdio: 'pipe', windowsHide: true })
+    // Windows cannot directly CreateProcess a .cmd shim; Node reports EINVAL.
+    // Invoke cmd.exe explicitly instead of `shell: true`, so the fixed command
+    // and arguments remain an argument vector rather than a shell-concatenated
+    // string supplied by the workspace.
+    const isBatchShim = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command)
+    const executable = isBatchShim ? (process.env.ComSpec ?? 'cmd.exe') : command
+    const childArgs = isBatchShim ? ['/d', '/c', command, ...args] : [...args]
+    const child = spawn(executable, childArgs, { cwd, env: { ...corepackEnvironment(), ...environment }, stdio: 'pipe', windowsHide: true })
     let diagnostics = ''
     child.stdout.on('data', chunk => { diagnostics = retainTail(diagnostics, String(chunk)) })
     child.stderr.on('data', chunk => { diagnostics = retainTail(diagnostics, String(chunk)) })
@@ -823,6 +922,23 @@ function runCommand(command: string, args: readonly string[], cwd: string): Prom
       else reject(new Error(`${command} ${args.join(' ')} failed with exit code ${String(code)}.${diagnostics.length === 0 ? '' : ` ${diagnostics}`}`))
     })
   })
+}
+
+function profilePackageSpec(value: string): string {
+  const spec = value.trim()
+  if (!isSafeProfilePackageToken(spec)) throw new Error('Enter one package name, tarball path, GitHub spec, or local folder path without shell characters or command flags.')
+  return spec
+}
+
+function profilePackageName(value: string): string {
+  const name = value.trim()
+  if (!isSafeProfilePackageToken(name)) throw new Error('Select a valid installed package name.')
+  return name
+}
+
+/** The upstream profile manager invokes pnpm through Windows' shell shim. */
+function isSafeProfilePackageToken(value: string): boolean {
+  return value.length > 0 && !value.startsWith('-') && !/[\s&|<>^()%!"]/u.test(value)
 }
 
 async function requireFile(file: string, message: string): Promise<void> {

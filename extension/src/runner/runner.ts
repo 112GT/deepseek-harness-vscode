@@ -13,6 +13,11 @@ export interface RunnerHistoryEntry {
   readonly text: string
 }
 
+/** A short, Host-confirmed result from a Harness slash command. */
+export interface RunnerCommandResult {
+  readonly text: string
+}
+
 export interface HarnessCapabilitiesSnapshot {
   readonly providers: readonly string[]
   readonly skills: readonly HarnessSkill[]
@@ -47,8 +52,10 @@ export interface AgentRunner extends vscode.Disposable {
   newSession(): string
   prompt(content: string, attachments: readonly PromptAttachment[]): Promise<void>
   cancelTurn(): Promise<void>
+  compactContext(): Promise<RunnerCommandResult>
   stop(): Promise<void>
   prepare(): Promise<void>
+  startLocalHost(): Promise<void>
   listSessions(): Promise<readonly RunnerSessionSummary[]>
   resumeSession(id: string): Promise<readonly RunnerHistoryEntry[]>
   inspectCapabilities(): Promise<HarnessCapabilitiesSnapshot>
@@ -57,5 +64,6 @@ export interface AgentRunner extends vscode.Disposable {
   selectPreset(id: string): Promise<void>
   copyPreset(from: string, id: string, name?: string): Promise<void>
   openPresetDocument(id: string): Promise<void>
+  removePreset(id: string): Promise<void>
   openHarnessSettings(): Promise<void>
 }

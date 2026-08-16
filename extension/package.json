@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness",
   "description": "Use DeepSeek Harness through an independent native VS Code agent sidebar.",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.6.1",
   "private": true,
   "publisher": "deepseek-harness-local",
   "license": "MIT",
@@ -24,8 +24,10 @@
   "activationEvents": [
     "onCommand:deepseekHarness.openChat",
     "onCommand:deepseekHarness.configureApiKey",
+    "onCommand:deepseekHarness.manageModelProviders",
     "onCommand:deepseekHarness.newSession",
     "onCommand:deepseekHarness.stopRunner",
+    "onCommand:deepseekHarness.startRunner",
     "onCommand:deepseekHarness.prepareRunner",
     "onCommand:deepseekHarness.verifyConnection",
     "onCommand:deepseekHarness.toggleCapabilitiesAutoRefresh",
@@ -46,6 +48,10 @@
         "title": "DeepSeek Harness: Configure API Key"
       },
       {
+        "command": "deepseekHarness.manageModelProviders",
+        "title": "DeepSeek Harness: Manage Model Providers"
+      },
+      {
         "command": "deepseekHarness.refreshRuntime",
         "title": "DeepSeek Harness: Refresh Runtime Status"
       },
@@ -58,12 +64,16 @@
         "title": "DeepSeek Harness: Stop Local Runner"
       },
       {
+        "command": "deepseekHarness.startRunner",
+        "title": "DeepSeek Harness: Start Local Runner"
+      },
+      {
         "command": "deepseekHarness.prepareRunner",
         "title": "DeepSeek Harness: Prepare Local Runtime"
       },
       {
         "command": "deepseekHarness.verifyConnection",
-        "title": "DeepSeek Harness: Verify DeepSeek Connection"
+        "title": "DeepSeek Harness: Verify Model Connection"
       },
       {
         "command": "deepseekHarness.selectHarnessFolder",
@@ -76,6 +86,10 @@
       {
         "command": "deepseekHarness.toggleCapabilitiesAutoRefresh",
         "title": "DeepSeek Harness: Toggle Capability Auto Refresh"
+      },
+      {
+        "command": "deepseekHarness.openPluginCenter",
+        "title": "DeepSeek Harness: Open Plugin Center"
       }
     ],
     "viewsContainers": {
@@ -107,7 +121,7 @@
     "viewsWelcome": [
       {
         "view": "deepseekHarness.runtime",
-        "contents": "[Open DeepSeek Harness Sidebar](command:deepseekHarness.openChat)\\n\\n[Configure API Key](command:deepseekHarness.configureApiKey)"
+        "contents": "[Open DeepSeek Harness Sidebar](command:deepseekHarness.openChat)\\n\\n[Manage Model Providers](command:deepseekHarness.manageModelProviders)"
       }
     ],
     "menus": {
@@ -162,13 +176,22 @@
         },
         "deepseekHarness.model": {
           "type": "string",
-          "enum": [
-            "deepseek-v4-pro",
-            "deepseek-v4-flash"
-          ],
           "default": "deepseek-v4-flash",
           "scope": "window",
-          "description": "Model passed to the local Harness Host sidecar. The sidebar offers V4-Pro and Flash."
+          "description": "Model ID passed to the local Harness Host sidecar. Choose it from the chat composer after configuring a provider."
+        },
+        "deepseekHarness.modelProvider": {
+          "type": "string",
+          "default": "deepseek-official",
+          "scope": "window",
+          "description": "Harness provider route for the selected chat model. Normally managed by the chat composer."
+        },
+        "deepseekHarness.reasoningEffort": {
+          "type": "string",
+          "enum": ["auto", "low", "medium", "high", "max"],
+          "default": "auto",
+          "scope": "window",
+          "description": "Requested model reasoning level. Max is sent only when the selected model supports it."
         },
         "deepseekHarness.hotReload.enabled": {
           "type": "boolean",
@@ -238,7 +261,7 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "check": "tsc --noEmit",
-    "package": "vsce package --no-dependencies --out ../deepseek-harness-vscode-0.2.0-dev.1.vsix"
+    "package": "vsce package --no-dependencies --out ../deepseek-harness-vscode-0.2.0-dev.6.1.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
@@ -250,6 +273,7 @@
   },
   "dependencies": {
     "fflate": "0.8.2",
-    "ws": "8.18.3"
+    "ws": "8.18.3",
+    "yaml": "2.8.1"
   }
 }

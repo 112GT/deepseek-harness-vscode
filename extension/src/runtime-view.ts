@@ -1,6 +1,7 @@
 import * as vscode from 'vscode'
 import type { AgentRunner } from './runner/runner'
 import type { HarnessSourceLocator, HarnessSourceStatus } from './runner/source-locator'
+import { ProviderManager } from './provider-manager'
 
 /** Sidebar tree showing the local prerequisites for the upcoming Runner bridge. */
 export class RuntimeViewProvider implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
@@ -15,6 +16,7 @@ export class RuntimeViewProvider implements vscode.TreeDataProvider<vscode.TreeI
     private readonly locator: HarnessSourceLocator,
     private readonly secrets: vscode.SecretStorage,
     private readonly runner: AgentRunner,
+    private readonly providers: ProviderManager,
   ) {
     this.sourceListener = locator.onDidChange(() => this.refresh())
     this.runnerListener = this.runner.onDidChangeStatus(() => this.refresh())
@@ -29,7 +31,7 @@ export class RuntimeViewProvider implements vscode.TreeDataProvider<vscode.TreeI
     if (element !== undefined) return []
     const source = await this.locator.inspect()
     const apiKey = await this.secrets.get('deepseekHarness.apiKey')
-    return [refreshItem(), sourceItem(source), apiKeyItem(apiKey !== undefined), runnerItem(this.runner)]
+    return [refreshItem(), sourceItem(source), apiKeyItem(apiKey !== undefined), selectedModelItem(this.providers), providerItem(this.providers), runnerItem(this.runner)]
   }
 
   getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
@@ -75,6 +77,27 @@ function apiKeyItem(configured: boolean): vscode.TreeItem {
   return item
 }
 
+function selectedModelItem(providers: ProviderManager): vscode.TreeItem {
+  const selection = providers.selected()
+  const label = providers.modelOptions().find(option => option.provider === selection.provider && option.model === selection.model)?.label
+    ?? `${selection.provider} · ${selection.model}`
+  const item = new vscode.TreeItem('Selected model', vscode.TreeItemCollapsibleState.None)
+  item.description = label
+  item.tooltip = 'Choose a model from the chat composer, or configure model providers here.'
+  item.iconPath = new vscode.ThemeIcon('symbol-method')
+  item.command = { command: 'deepseekHarness.manageModelProviders', title: 'Manage Model Providers' }
+  return item
+}
+
+function providerItem(providers: ProviderManager): vscode.TreeItem {
+  const item = new vscode.TreeItem('Model providers', vscode.TreeItemCollapsibleState.None)
+  item.description = providers.configuredSummary()
+  item.tooltip = 'Configure OpenAI, Anthropic, Google Gemini, or an OpenAI-compatible API. Keys are stored in VS Code SecretStorage.'
+  item.iconPath = new vscode.ThemeIcon('settings-gear')
+  item.command = { command: 'deepseekHarness.manageModelProviders', title: 'Manage Model Providers' }
+  return item
+}
+
 function runnerItem(runner: AgentRunner): vscode.TreeItem {
   const status = runner.getStatus()
   const item = new vscode.TreeItem('Local Runner', vscode.TreeItemCollapsibleState.None)
@@ -82,7 +105,7 @@ function runnerItem(runner: AgentRunner): vscode.TreeItem {
   item.tooltip = status.detail
   item.iconPath = new vscode.ThemeIcon(status.state === 'error' ? 'error' : status.state === 'running' ? 'sync~spin' : 'server')
   item.command = status.state === 'stopped'
-    ? { command: 'deepseekHarness.prepareRunner', title: 'Prepare Local Runtime' }
+    ? { command: 'deepseekHarness.startRunner', title: 'Start Local Runner' }
     : { command: 'deepseekHarness.stopRunner', title: 'Stop Local Runner' }
   return item
 }

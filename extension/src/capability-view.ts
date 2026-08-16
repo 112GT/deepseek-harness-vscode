@@ -133,7 +133,11 @@ function controlNodes(): readonly LeafNode[] {
       command: { command: 'deepseekHarness.openHarnessSettings', title: 'Open Harness settings' },
     },
     {
-      kind: 'leaf', label: 'Manage agent presets', description: 'Select or copy a preset for a new session.', icon: 'tools',
+      kind: 'leaf', label: 'Open Plugin Center', description: 'Invoke Skills, manage user presets, or open VS Code extension controls.', icon: 'extensions',
+      command: { command: 'deepseekHarness.openPluginCenter', title: 'Open DeepSeek Harness Plugin Center' },
+    },
+    {
+      kind: 'leaf', label: 'Manage agent presets', description: 'Create, edit, enable, disable, or delete user-owned preset plugins.', icon: 'tools',
       command: { command: 'deepseekHarness.manageAgentPresets', title: 'Manage Harness agent presets' },
     },
     {

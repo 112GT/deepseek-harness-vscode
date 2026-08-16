@@ -4,6 +4,15 @@ import type { PromptAttachment, RunnerEvent, RunnerTodoItem } from './runner/pro
 import type { HarnessRunnerStatus } from './runner/harness-runner'
 import type { AgentRunner, RunnerHistoryEntry } from './runner/runner'
 import { WorkspaceChangeTracker, type WorkspaceChange } from './workspace-changes'
+import { isModelSelection, type ModelOption, type ModelSelection } from './provider-config'
+import { TerminalContextRecorder } from './terminal-context'
+
+const MAX_ATTACHMENTS = 16
+const MAX_CONTEXT_CHARS = 100_000
+const MAX_FILE_CHARS = 12_000
+const MAX_FOLDER_FILES = 12
+const MAX_FOLDER_CHARS = 48_000
+const MAX_TERMINAL_CHARS = 16_000
 
 type ChatRole = 'assistant' | 'user' | 'thinking' | 'tool' | 'error'
 
@@ -55,6 +64,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private workspaceChanges: readonly WorkspaceChange[] = []
   private usage: Usage | undefined
   private view: vscode.WebviewView | undefined
+  // A Webview click can clear activeTextEditor. Preserve the last text editor
+  // so the context picker still targets the editor the user just left.
+  private lastTextEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor
   private nextId = 1
   private trackingTurn: 'idle' | 'arming' | 'running' | 'finishing' = 'idle'
 
@@ -62,15 +74,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     private readonly runner: AgentRunner,
     private readonly configureApiKey: () => Promise<boolean>,
     private readonly apiKeyConfigured: () => Promise<boolean>,
-    private readonly model: () => string,
-    private readonly setModel: (model: string) => Promise<void>,
+    private readonly model: () => ModelSelection,
+    private readonly modelOptions: () => readonly ModelOption[],
+    private readonly setModel: (model: ModelSelection) => Promise<void>,
+    private readonly reasoningEffort: () => string,
+    private readonly setReasoningEffort: (effort: string) => Promise<void>,
+    private readonly configureProviders: () => Promise<void>,
     private readonly permissionMode: () => 'read-only' | 'workspace-write' | 'danger-full-access',
     private readonly setPermissionMode: (mode: 'read-only' | 'workspace-write' | 'danger-full-access') => Promise<void>,
     private readonly versionSnapshots: () => boolean,
     private readonly toggleVersionSnapshots: () => Promise<boolean>,
     private readonly changeTracker: WorkspaceChangeTracker,
+    private readonly terminalContext: TerminalContextRecorder,
   ) {
     this.disposables = [
+      vscode.window.onDidChangeActiveTextEditor(editor => {
+        if (editor !== undefined) this.lastTextEditor = editor
+      }),
       runner.onDidEvent(event => this.handleRunnerEvent(event)),
       runner.onDidChangeStatus(status => this.handleRunnerStatus(status)),
       changeTracker.onDidChange(changes => {
@@ -85,7 +105,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     view.webview.options = { enableScripts: true }
     view.webview.html = html(view.webview)
     this.disposables.push(view.webview.onDidReceiveMessage(message => {
-      void this.handleWebviewRequest(message)
+      void this.handleWebviewRequest(message).catch(error => this.addError(`Context action failed: ${errorMessage(error)}`))
     }))
     this.disposables.push(view.onDidDispose(() => { this.view = undefined }))
     void this.refresh()
@@ -155,8 +175,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       case 'sessionHistory':
         await this.openSessionHistory()
         return
+      case 'resumeSession':
+        if (typeof request.content === 'string') await this.resumeSession(request.content)
+        return
       case 'droppedFiles':
         await this.attachDroppedFiles(request.content)
+        return
+      case 'droppedUris':
+        await this.attachDroppedUris(request.content)
         return
       case 'removeAttachment':
         if (typeof request.content === 'string') this.removeAttachment(request.content)
@@ -184,8 +210,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         await this.refresh()
         return
       case 'setModel':
-        if (isSupportedModel(request.content)) {
+        if (isModelSelection(request.content)) {
           await this.setModel(request.content)
+          await this.refresh()
+        }
+        return
+      case 'setReasoningEffort':
+        if (isReasoningEffort(request.content)) {
+          await this.setReasoningEffort(request.content)
           await this.refresh()
         }
         return
@@ -204,6 +236,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       case 'configureApiKey':
         await this.configureKey()
         return
+      case 'configureProviders':
+        try {
+          await this.configureProviders()
+          await this.refresh()
+        } catch (error) {
+          this.addError(errorMessage(error))
+        }
+        return
+      case 'compactContext':
+        await this.compactContext()
+        return
       default:
         return
     }
@@ -212,6 +255,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private async submit(content: string): Promise<void> {
     const prompt = content.trim()
     if (prompt.length === 0) return
+    // Slash commands are Host commands, not instructions for the configured
+    // model. Treat the exact composer form like the context-meter control.
+    if (prompt === '/compact' && this.attachments.length === 0) {
+      await this.compactContext()
+      return
+    }
     this.workspaceChanges = []
     this.trackingTurn = 'arming'
     await this.changeTracker.begin()
@@ -228,51 +277,59 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     }
   }
 
-  private async addContext(kind: 'selection' | 'document' | 'diagnostics' | 'external' | 'folder'): Promise<void> {
-    if (kind === 'external') {
-      await this.attachExternalFiles()
-      return
+  private async compactContext(): Promise<void> {
+    try {
+      const result = await this.runner.compactContext()
+      this.post({ type: 'notice', text: result.text })
+    } catch (error) {
+      this.addError(errorMessage(error))
     }
-    if (kind === 'folder') {
-      await this.attachExternalFolder()
+  }
+
+  private async addContext(kind: 'selection' | 'document' | 'diagnostics' | 'external' | 'terminal'): Promise<void> {
+    if (kind === 'external') {
+      await this.attachExternalItems()
       return
     }
     if (kind === 'diagnostics') {
       this.attachDiagnostics()
       return
     }
+    if (kind === 'terminal') {
+      this.attachTerminal()
+      return
+    }
     this.attachEditorContext(kind)
   }
 
   private attachEditorContext(kind: 'selection' | 'document'): void {
-    const editor = vscode.window.activeTextEditor
+    const editor = this.contextEditor()
     if (editor === undefined) {
       this.addError('Open an editor before attaching context.')
       return
     }
     const selection = editor.selection
-    const selected = editor.document.getText(selection)
-    if (kind === 'selection' && selected.length === 0) {
+    if (kind === 'selection' && selection.isEmpty) {
       this.addError('Select text in the editor before attaching a selection.')
       return
     }
-    const content = kind === 'selection' ? selected : editor.document.getText()
+    const excerpt = documentExcerpt(editor.document, kind === 'selection' ? selection : undefined)
+    const content = excerpt.text
     if (content.trim().length === 0) {
       this.addError('The requested editor context is empty.')
       return
     }
-    const maximum = 20_000
     const attachment: PromptAttachment = {
       kind,
       uri: editor.document.uri.toString(),
       label: kind === 'document' ? editor.document.fileName : `${editor.document.fileName}:${editor.selection.start.line + 1}`,
-      content: content.length <= maximum ? content : `${content.slice(0, maximum - 1)}…`,
+      content: excerpt.truncated ? `${content}…` : content,
     }
     this.storeAttachment(attachment)
   }
 
   private attachDiagnostics(): void {
-    const editor = vscode.window.activeTextEditor
+    const editor = this.contextEditor()
     if (editor === undefined) {
       this.addError('Open an editor before attaching diagnostics.')
       return
@@ -294,40 +351,63 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     })
   }
 
-  private async attachExternalFiles(): Promise<void> {
-    const files = await vscode.window.showOpenDialog({
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: true,
-      title: 'Attach files from another folder',
-      openLabel: 'Attach to Harness request',
-    })
-    if (files === undefined || files.length === 0) return
-    let attached = 0
-    for (const file of files) {
-      try {
-        if (await this.attachFile(file, 'External')) attached += 1
-      } catch (error) {
-        this.addError(`Unable to attach ${file.fsPath}: ${errorMessage(error)}`)
-      }
+  private attachTerminal(): void {
+    const transcript = this.terminalContext.activeTranscript()
+    if (transcript === undefined) {
+      this.addError('No captured output is available for the active terminal. Run a command after VS Code shell integration is active, then attach it.')
+      return
     }
-    if (attached > 0) this.post({ type: 'notice', text: `Attached ${String(attached)} external file(s).` })
+    this.storeAttachment({
+      kind: 'terminal', label: transcript.label,
+      content: transcript.content.length <= MAX_TERMINAL_CHARS ? transcript.content : `… terminal output truncated …\n${transcript.content.slice(-MAX_TERMINAL_CHARS)}`,
+    })
   }
 
-  private async attachExternalFolder(): Promise<void> {
-    const selected = await vscode.window.showOpenDialog({
-      canSelectFiles: false,
+  private async attachExternalItems(): Promise<void> {
+    const items = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
       canSelectFolders: true,
-      canSelectMany: false,
-      title: 'Attach a folder',
-      openLabel: 'Attach folder contents',
+      canSelectMany: true,
+      title: 'Attach files or folders',
+      openLabel: 'Attach to Harness request',
     })
-    const root = selected?.[0]
-    if (root === undefined) return
-    const files = await collectFiles(root, 30)
+    if (items === undefined || items.length === 0) return
     let attached = 0
-    for (const file of files) if (await this.attachFile(file, 'Folder')) attached += 1
-    this.post({ type: 'notice', text: `Attached ${String(attached)} file(s) from ${root.fsPath}.` })
+    for (const item of items) {
+      try {
+        const stat = await vscode.workspace.fs.stat(item)
+        if (stat.type === vscode.FileType.Directory) {
+          if (await this.attachFolder(item)) attached += 1
+        } else if (stat.type === vscode.FileType.File && await this.attachFile(item, 'External')) attached += 1
+      } catch (error) {
+        this.addError(`Unable to attach ${item.fsPath}: ${errorMessage(error)}`)
+      }
+    }
+    if (attached > 0) this.post({ type: 'notice', text: `Attached ${String(attached)} item(s), with safe context limits applied.` })
+  }
+
+  private async attachFolder(root: vscode.Uri): Promise<boolean> {
+    const files = await collectFiles(root, MAX_FOLDER_FILES)
+    const parts: string[] = []
+    let total = 0
+    for (const file of files) {
+      const bytes = await vscode.workspace.fs.readFile(file)
+      if (bytes.byteLength > 1_000_000 || bytes.includes(0)) continue
+      const content = new TextDecoder().decode(bytes).trim()
+      if (content.length === 0) continue
+      const remaining = MAX_FOLDER_CHARS - total
+      if (remaining <= 0) break
+      const relative = vscode.workspace.asRelativePath(file, false)
+      const excerpt = content.length <= remaining ? content : `${content.slice(0, Math.max(0, remaining - 1))}…`
+      parts.push(`\n--- ${relative} ---\n${excerpt}`)
+      total += excerpt.length
+    }
+    if (parts.length === 0) {
+      this.addError(`No readable text files found in folder: ${root.fsPath}`)
+      return false
+    }
+    // One bounded attachment means the chip names only the folder, not every child.
+    return this.storeAttachment({ kind: 'document', uri: root.toString(), label: `Folder: ${pathBasename(root)}`, content: parts.join('') })
   }
 
   private async attachFile(file: vscode.Uri, prefix: string): Promise<boolean> {
@@ -354,7 +434,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       this.addError(`Skipped empty file: ${file.fsPath}`)
       return false
     }
-    const maximum = 20_000
+    const maximum = MAX_FILE_CHARS
     this.storeAttachment({
       kind: 'document', uri: file.toString(), label: `${prefix}: ${file.fsPath}`,
       content: content.length <= maximum ? content : `${content.slice(0, maximum - 1)}…`,
@@ -424,10 +504,72 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     if (attached > 0) this.post({ type: 'notice', text: `Attached ${String(attached)} dropped file(s).` })
   }
 
-  private storeAttachment(attachment: PromptAttachment): void {
+  /** Accepts a VS Code editor-tab drag, including a dirty or untitled visible document. */
+  private async attachDroppedUris(value: unknown): Promise<void> {
+    if (!Array.isArray(value)) return
+    const seen = new Set<string>()
+    let attached = 0
+    for (const raw of value.slice(0, 8)) {
+      const uri = droppedUri(raw)
+      if (uri === undefined || seen.has(uri.toString())) continue
+      seen.add(uri.toString())
+      const openEditor = vscode.window.visibleTextEditors.find(editor => editor.document.uri.toString() === uri.toString())
+      if (openEditor !== undefined) {
+        if (this.attachVisibleEditor(openEditor, 'Editor tab')) attached += 1
+        continue
+      }
+      if (uri.scheme !== 'file') continue
+      try {
+        const stat = await vscode.workspace.fs.stat(uri)
+        if (stat.type === vscode.FileType.File && await this.attachFile(uri, 'Editor tab')) attached += 1
+        else if (stat.type === vscode.FileType.Directory && await this.attachFolder(uri)) attached += 1
+      } catch (error) {
+        this.addError(`Unable to attach dropped editor tab ${uri.fsPath}: ${errorMessage(error)}`)
+      }
+    }
+    if (attached > 0) this.post({ type: 'notice', text: `Attached ${String(attached)} editor tab(s).` })
+  }
+
+  private attachVisibleEditor(editor: vscode.TextEditor, prefix: string): boolean {
+    const excerpt = documentExcerpt(editor.document)
+    const content = excerpt.text
+    if (content.trim().length === 0) {
+      this.addError(`Skipped empty editor tab: ${editor.document.fileName}`)
+      return false
+    }
+    return this.storeAttachment({
+      kind: 'document', uri: editor.document.uri.toString(), label: `${prefix}: ${editor.document.fileName}`,
+      content: excerpt.truncated ? `${content}…` : content,
+    })
+  }
+
+  /** Prefer the currently active editor group, then the most recently focused text editor. */
+  private contextEditor(): vscode.TextEditor | undefined {
+    const visible = vscode.window.visibleTextEditors
+    const tabUri = textTabUri(vscode.window.tabGroups.activeTabGroup.activeTab)
+    if (tabUri !== undefined) {
+      const inActiveGroup = visible.find(editor => editor.document.uri.toString() === tabUri.toString())
+      if (inActiveGroup !== undefined) return inActiveGroup
+    }
+    if (this.lastTextEditor !== undefined && visible.includes(this.lastTextEditor)) return this.lastTextEditor
+    if (vscode.window.activeTextEditor !== undefined) return vscode.window.activeTextEditor
+    return [...visible].sort((left, right) => (right.viewColumn ?? 0) - (left.viewColumn ?? 0))[0]
+  }
+
+  private storeAttachment(attachment: PromptAttachment): boolean {
+    if (this.attachments.length >= MAX_ATTACHMENTS) {
+      this.addError(`Context limit reached: attach at most ${String(MAX_ATTACHMENTS)} items per request.`)
+      return false
+    }
+    const current = this.attachments.reduce((total, item) => total + attachmentSize(item.attachment), 0)
+    if (current + attachmentSize(attachment) > MAX_CONTEXT_CHARS) {
+      this.addError(`Context limit reached: keep attached text under ${String(MAX_CONTEXT_CHARS / 1_000)}K characters.`)
+      return false
+    }
     const stored: StoredAttachment = { id: randomNonce(), attachment }
     this.attachments.push(stored)
     this.post({ type: 'attachments', attachments: this.attachments.map(attachmentView) })
+    return true
   }
 
   private removeAttachment(id: string): void {
@@ -448,18 +590,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private async openSessionHistory(): Promise<void> {
     try {
       const sessions = await this.runner.listSessions()
-      if (sessions.length === 0) {
-        this.post({ type: 'notice', text: 'No saved Harness sessions yet.' })
-        return
-      }
-      const picked = await vscode.window.showQuickPick(sessions.map(session => ({
-        label: session.title,
-        description: session.updatedAt,
-        detail: session.id,
-        session,
-      })), { title: 'DeepSeek Harness sessions', placeHolder: 'Restore a previous conversation' })
-      if (picked === undefined) return
-      const entries = await this.runner.resumeSession(picked.session.id)
+      this.post({ type: 'sessionHistory', sessions })
+    } catch (error) {
+      this.addError(errorMessage(error))
+    }
+  }
+
+  private async resumeSession(id: string): Promise<void> {
+    try {
+      const entries = await this.runner.resumeSession(id)
       this.restoreHistory(entries)
     } catch (error) {
       this.addError(errorMessage(error))
@@ -622,7 +761,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       workspaceChanges: this.workspaceChanges,
       todos: this.todos,
       usage: this.usage,
-      model: this.model(),
+      modelSelection: this.model(),
+      modelOptions: this.modelOptions(),
+      reasoningEffort: this.reasoningEffort(),
       permissionMode: this.permissionMode(),
       versionSnapshots: this.versionSnapshots(),
       status: this.runner.getStatus(),
@@ -669,16 +810,16 @@ function asArchiveRequest(value: unknown): { readonly before?: string; readonly 
   return { ...(before === undefined ? {} : { before }), ...(after === undefined ? {} : { after }), label }
 }
 
-function isSupportedModel(value: unknown): value is 'deepseek-v4-pro' | 'deepseek-v4-flash' {
-  return value === 'deepseek-v4-pro' || value === 'deepseek-v4-flash'
-}
-
 function isPermissionMode(value: unknown): value is 'read-only' | 'workspace-write' | 'danger-full-access' {
   return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access'
 }
 
-function isContextKind(value: unknown): value is 'selection' | 'document' | 'diagnostics' | 'external' | 'folder' {
-  return value === 'selection' || value === 'document' || value === 'diagnostics' || value === 'external' || value === 'folder'
+function isReasoningEffort(value: unknown): value is 'auto' | 'low' | 'medium' | 'high' | 'max' {
+  return value === 'auto' || value === 'low' || value === 'medium' || value === 'high' || value === 'max'
+}
+
+function isContextKind(value: unknown): value is 'selection' | 'document' | 'diagnostics' | 'external' | 'terminal' {
+  return value === 'selection' || value === 'document' || value === 'diagnostics' || value === 'external' || value === 'terminal'
 }
 
 function errorMessage(error: unknown): string {
@@ -687,6 +828,40 @@ function errorMessage(error: unknown): string {
 
 function attachmentView(stored: StoredAttachment): { readonly id: string; readonly label: string; readonly kind: PromptAttachment['kind'] } {
   return { id: stored.id, label: stored.attachment.label, kind: stored.attachment.kind }
+}
+
+function attachmentSize(attachment: PromptAttachment): number {
+  return attachment.kind === 'image' ? Math.ceil(attachment.data.length * 0.75) : attachment.content.length
+}
+
+function pathBasename(uri: vscode.Uri): string {
+  const segments = uri.path.split('/').filter(Boolean)
+  return segments.at(-1) ?? uri.fsPath
+}
+
+function textTabUri(tab: vscode.Tab | undefined): vscode.Uri | undefined {
+  const input = tab?.input
+  return typeof vscode.TabInputText === 'function' && input instanceof vscode.TabInputText ? input.uri : undefined
+}
+
+/** Reads only the requested prefix; never materializes a large editor file in the extension host. */
+function documentExcerpt(document: vscode.TextDocument, range?: vscode.Range): { readonly text: string; readonly truncated: boolean } {
+  const target = range ?? new vscode.Range(new vscode.Position(0, 0), document.positionAt(Number.MAX_SAFE_INTEGER))
+  const start = document.offsetAt(target.start)
+  const end = document.offsetAt(target.end)
+  const boundedEnd = Math.min(end, start + MAX_FILE_CHARS)
+  const boundedRange = new vscode.Range(target.start, document.positionAt(boundedEnd))
+  return { text: document.getText(boundedRange), truncated: boundedEnd < end }
+}
+
+function droppedUri(value: unknown): vscode.Uri | undefined {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 16_384) return undefined
+  try {
+    const uri = vscode.Uri.parse(value, true)
+    return uri.scheme.length === 0 ? undefined : uri
+  } catch {
+    return undefined
+  }
 }
 
 function assertNever(value: never): never {
@@ -755,7 +930,7 @@ function html(webview: vscode.Webview): string {
     body { margin: 0; overflow: hidden; background: var(--panel); font-size: 13px; line-height: 1.5; }
     button { border: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
     button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    #app { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+    #app { position: relative; height: 100%; min-height: 0; display: flex; flex-direction: column; }
     .topbar { height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 12px; border-bottom: 1px solid var(--line); }
     .brand-mark { width: 23px; height: 23px; display: grid; place-items: center; border-radius: 7px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font-size: 14px; font-weight: 700; }
     .topbar[data-running="true"] .brand-mark { animation: active-glow 1.15s ease-in-out infinite; }
@@ -770,6 +945,8 @@ function html(webview: vscode.Webview): string {
     .state-dot[data-state="error"] { background: var(--vscode-testing-iconFailed); }
     @keyframes pulse { 50% { opacity: .35; } }
     @keyframes active-glow { 50% { transform: scale(1.07); box-shadow: 0 0 0 4px color-mix(in srgb, var(--vscode-progressBar-background) 22%, transparent), 0 0 14px color-mix(in srgb, var(--vscode-progressBar-background) 62%, transparent); } }
+    .chat-tabs { display: flex; gap: 18px; margin: 8px 12px 0; border-bottom: 1px solid var(--line); } .chat-tab { padding: 6px 2px 7px; color: var(--muted); font-size: 12px; } .chat-tab[data-active="true"] { color: var(--vscode-textLink-foreground); border-bottom: 2px solid var(--vscode-textLink-foreground); font-weight: 600; }
+    #panes { flex: 1; min-height: 0; } #conversation, #trace { height: 100%; }
     #todo-dock { margin: 10px 12px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     #todo-dock summary { display: flex; align-items: center; gap: 7px; min-height: 34px; padding: 6px 9px; color: var(--muted); cursor: pointer; list-style: none; }
     #todo-dock summary::-webkit-details-marker { display: none; }
@@ -779,7 +956,24 @@ function html(webview: vscode.Webview): string {
     .todo-symbol { width: 14px; flex: none; text-align: center; color: var(--vscode-descriptionForeground); }
     .todo[data-status="in_progress"] .todo-symbol { color: var(--vscode-progressBar-background); }
     .todo[data-status="completed"] { text-decoration: line-through; opacity: .7; }
-    #conversation { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 8px; overflow-y: auto; overflow-wrap: anywhere; }
+    #conversation { min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 8px; overflow-y: auto; overflow-wrap: anywhere; }
+    #trace { overflow: auto; padding: 10px 12px; } .trace-legend { display: flex; gap: 12px; margin: 0 0 8px; color: var(--muted); font-size: 11px; } .trace-row { display: grid; grid-template-columns: 72px 1fr; gap: 8px; min-height: 31px; border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); } .trace-type { display: flex; align-items: center; font-size: 10px; font-weight: 700; letter-spacing: .3px; } .trace-type[data-role="user"] { color: var(--vscode-charts-blue, #75beff); } .trace-type[data-role="assistant"] { color: var(--vscode-charts-purple, #b180d7); } .trace-type[data-role="thinking"] { color: var(--vscode-charts-yellow, #d7ba7d); } .trace-type[data-role="tool"] { color: var(--vscode-charts-orange, #d18616); } .trace-type[data-role="error"] { color: var(--vscode-errorForeground); } .trace-content { min-width: 0; padding: 7px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .trace-bar { display: block; width: min(100%, 180px); height: 6px; margin-top: 4px; border-radius: 4px; background: var(--soft); } .trace-row[data-role="tool"] .trace-bar { background: var(--vscode-charts-orange, #d18616); } .trace-row[data-role="thinking"] .trace-bar { background: var(--vscode-charts-yellow, #d7ba7d); }
+    #conversation[hidden], #trace[hidden] { display: none !important; }
+    #history-panel { position: absolute; z-index: 5; inset: 0; display: flex; flex-direction: column; padding: 12px; background: var(--panel); }
+    #history-panel[hidden] { display: none !important; }
+    .history-heading { display: flex; align-items: center; min-height: 30px; color: var(--vscode-foreground); font-size: 14px; font-weight: 600; }
+    .history-close { width: 26px; height: 26px; margin-left: auto; border-radius: 5px; color: var(--muted); font-size: 17px; }
+    .history-close:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+    #history-new { width: 100%; margin: 8px 0 16px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--vscode-textLink-foreground); text-align: center; }
+    #history-new:hover { background: var(--vscode-toolbar-hoverBackground); }
+    .history-group { margin: 0 0 7px; color: var(--muted); font-size: 11px; }
+    #history-list { display: flex; flex-direction: column; overflow-y: auto; }
+    .history-session { position: relative; width: 100%; padding: 7px 8px 8px 17px; border-radius: 5px; text-align: left; }
+    .history-session::before { content: ""; position: absolute; top: 13px; left: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--vscode-charts-blue, #75beff); }
+    .history-session:hover { background: var(--vscode-list-hoverBackground); }
+    .history-title { display: block; overflow: hidden; color: var(--vscode-foreground); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .history-time { display: block; margin-top: 1px; color: var(--muted); font-size: 10px; }
+    .history-empty { padding: 12px 4px; color: var(--muted); font-size: 12px; }
     #empty { flex: 1; min-height: 0; display: grid; place-items: center; padding: 26px 20px; text-align: center; color: var(--muted); }
     #empty[hidden] { display: none !important; }
     .empty-logo { width: 42px; height: 42px; display: grid; place-items: center; margin-bottom: 13px; border: 1px solid var(--line); border-radius: 13px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font-size: 22px; }
@@ -839,34 +1033,38 @@ function html(webview: vscode.Webview): string {
     .control { display: inline-flex; align-items: center; gap: 4px; min-width: 28px; height: 28px; padding: 0 7px; border-radius: 14px; color: var(--muted); font-size: 12px; }
     .control:hover:not(:disabled) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
     .control:disabled { opacity: .45; cursor: default; }
-    .dropdown { position: relative; } .dropdown > summary { list-style: none; } .dropdown > summary::-webkit-details-marker { display: none; } .dropdown > summary.control { cursor: pointer; } .dropdown[data-disabled="true"] > summary { opacity: .45; cursor: default; pointer-events: none; } .dropdown-menu { position: absolute; z-index: 20; bottom: 34px; left: 0; min-width: 168px; padding: 5px; border: 1px solid var(--vscode-menu-border, var(--line)); border-radius: 7px; color: var(--vscode-menu-foreground, var(--vscode-foreground)); background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); box-shadow: 0 5px 18px color-mix(in srgb, black 28%, transparent); } .dropdown-menu[data-wide="true"] { min-width: 210px; } .menu-choice { display: flex; width: 100%; align-items: center; gap: 7px; padding: 7px 8px; border-radius: 5px; color: inherit; text-align: left; font-size: 12px; } .menu-choice:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); } .menu-choice small { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 10px; } .model-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; } .model-dot[data-model="deepseek-v4-pro"] { background: var(--vscode-charts-purple, #b180d7); box-shadow: 0 0 7px color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 70%, transparent); } .model-dot[data-model="deepseek-v4-flash"] { background: var(--vscode-charts-yellow, #d7ba7d); box-shadow: 0 0 7px color-mix(in srgb, var(--vscode-charts-yellow, #d7ba7d) 65%, transparent); }
+    .dropdown { position: relative; } .dropdown > summary { list-style: none; } .dropdown > summary::-webkit-details-marker { display: none; } .dropdown > summary.control { cursor: pointer; } .dropdown[data-disabled="true"] > summary { opacity: .45; cursor: default; pointer-events: none; } .dropdown-menu { position: absolute; z-index: 20; bottom: 34px; left: 0; min-width: 190px; padding: 5px; border: 1px solid var(--vscode-menu-border, var(--line)); border-radius: 7px; color: var(--vscode-menu-foreground, var(--vscode-foreground)); background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); box-shadow: 0 5px 18px color-mix(in srgb, black 28%, transparent); } .dropdown-menu[data-wide="true"] { min-width: 210px; } .menu-choice { display: flex; width: 100%; align-items: center; gap: 7px; padding: 7px 8px; border-radius: 5px; color: inherit; text-align: left; font-size: 12px; } .menu-choice:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); } .menu-choice small { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 10px; } .model-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--vscode-charts-blue, #75beff); box-shadow: 0 0 7px color-mix(in srgb, var(--vscode-charts-blue, #75beff) 65%, transparent); } .model-dot[data-tone="pro"] { background: var(--vscode-charts-purple, #b180d7); box-shadow: 0 0 7px color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 70%, transparent); } .model-dot[data-tone="flash"] { background: var(--vscode-charts-yellow, #d7ba7d); box-shadow: 0 0 7px color-mix(in srgb, var(--vscode-charts-yellow, #d7ba7d) 65%, transparent); } .model-dot[data-tone="openai"] { background: var(--vscode-testing-iconPassed, #73c991); } .model-dot[data-tone="anthropic"] { background: var(--vscode-charts-orange, #d18616); } .model-dot[data-tone="google"] { background: var(--vscode-charts-blue, #75beff); } .model-dot[data-tone="compatible"] { background: var(--vscode-charts-green, #89d185); }
     #permission-picker[data-mode="read-only"] > summary { color: var(--vscode-testing-iconPassed); } #permission-picker[data-mode="danger-full-access"] > summary { color: var(--vscode-errorForeground); }
-    #snapshot[data-enabled="true"] { color: var(--vscode-testing-iconPassed); }
+    #snapshot[data-enabled="true"] { color: var(--vscode-testing-iconPassed); } #context-meter summary { padding-right: 5px; } #context-ring { width: 21px; height: 21px; display: grid; place-items: center; border: 2px solid var(--vscode-progressBar-background); border-radius: 50%; color: var(--vscode-foreground); font-size: 8px; font-weight: 700; } .context-detail { display: block; padding: 4px 8px 7px; color: var(--muted); font-size: 11px; } #compact { margin-top: 3px; border-top: 1px solid var(--vscode-menu-separatorBackground, var(--line)); color: var(--vscode-textLink-foreground); }
     .spacer { flex: 1; }
     #send { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font-size: 14px; }
     #send:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
     #send:disabled { opacity: .45; cursor: default; }
     #key-warning { margin: 0 0 7px; color: var(--vscode-notificationsWarningIcon-foreground); font-size: 11px; }
+    .model-manage { margin-top: 3px; border-top: 1px solid var(--vscode-menu-separatorBackground, var(--line)); color: var(--vscode-textLink-foreground); }
     @media (max-width: 260px) { .brand { display: none; } #model { max-width: 70px; } .control-label { display: none; } }
     @media (prefers-reduced-motion: reduce) { .message, .state-dot[data-state="running"], .think[data-state="running"]::after, .tool[data-state="running"] .tool-state, .topbar[data-running="true"] .brand-mark { animation: none; } }
   </style>
 </head>
 <body>
   <div id="app">
-    <header id="topbar" class="topbar" data-running="false"><span class="brand-mark" aria-hidden="true">◇</span><span class="brand">DeepSeek Harness</span><button id="new" class="icon-button" title="新建会话" aria-label="新建会话">＋</button><button id="configure" class="icon-button" title="配置 API 密钥" aria-label="配置 API 密钥">⚙</button></header>
+    <header id="topbar" class="topbar" data-running="false"><span class="brand-mark" aria-hidden="true">◇</span><span class="brand">DeepSeek Harness</span><button id="new" class="icon-button" title="新建会话" aria-label="新建会话">＋</button></header>
     <div class="session-line"><span id="state-dot" class="state-dot" data-state="stopped"></span><span id="status">本地 Runner 未启动</span></div>
+    <nav class="chat-tabs" aria-label="Harness panels"><button class="chat-tab" data-panel="conversation" data-active="true">对话</button><button class="chat-tab" data-panel="trace" data-active="false">轨迹</button></nav>
     <details id="todo-dock" hidden><summary><span aria-hidden="true">☷</span><span>任务</span><span id="todo-count" class="todo-count">0</span></summary><div id="todos"></div></details>
-    <main id="conversation"></main>
+    <div id="panes"><main id="conversation"></main><main id="trace" hidden></main></div>
     <div id="empty"><div><div class="empty-logo">◇</div><div class="empty-title">DeepSeek Harness</div><div class="empty-copy">从当前工作区开始。你可以附加代码、文件或 Problems，再让 Harness 读取、规划和执行。</div></div></div>
+    <aside id="history-panel" hidden aria-label="当前工程会话历史"><div class="history-heading"><span>会话</span><button id="history-close" class="history-close" title="关闭会话历史" aria-label="关闭会话历史">×</button></div><button id="history-new" type="button">新建会话</button><div class="history-group">当前工程文件夹 · 已保存会话</div><div id="history-list"></div></aside>
     <details id="changes-dock" hidden open><summary><span aria-hidden="true">▣</span><span>本轮文件变更</span><span id="changes-count">0</span></summary><div id="changes"></div></details>
-    <section id="composer-seat"><div id="stats"></div><div id="attachments"></div><div id="key-warning" hidden>请先配置 DeepSeek API 密钥。</div><div class="composer"><textarea id="prompt" aria-label="向 DeepSeek Harness 提问" placeholder="向 DeepSeek Harness 提问…"></textarea><div class="composer-actions"><details id="context-picker" class="dropdown"><summary id="attach" class="control" title="选择上下文来源"><span aria-hidden="true">＋</span><span class="control-label">上下文</span><span aria-hidden="true">⌄</span></summary><div class="dropdown-menu" data-wide="true"><button class="menu-choice" data-context="selection">当前选区<small>代码片段</small></button><button class="menu-choice" data-context="document">当前文件<small>完整文件</small></button><button class="menu-choice" data-context="diagnostics">当前 Problems<small>错误和警告</small></button><button class="menu-choice" data-context="external">选择其他文件<small>任意文件夹</small></button></div></details><details id="model-picker" class="dropdown"><summary id="model" class="control" title="选择模型"><span id="model-dot" class="model-dot" data-model="deepseek-v4-flash"></span><span id="model-label">Flash</span><span aria-hidden="true">⌄</span></summary><div class="dropdown-menu"><button class="menu-choice" data-model="deepseek-v4-pro"><span class="model-dot" data-model="deepseek-v4-pro"></span>V4-Pro<small>完整推理</small></button><button class="menu-choice" data-model="deepseek-v4-flash"><span class="model-dot" data-model="deepseek-v4-flash"></span>Flash<small>快速响应</small></button></div></details><button id="snapshot" class="control" title="是否为本轮文件变更保存版本副本" aria-label="切换版本存档">存档：关</button><span class="spacer"></span><button id="stop" class="control" title="停止当前任务" aria-label="停止当前任务">■</button><button id="send" title="发送" aria-label="发送">↑</button></div></div></section>
+    <section id="composer-seat"><div id="stats"></div><div id="attachments"></div><div id="key-warning" hidden>请先配置当前模型的 API 密钥。</div><div class="composer"><textarea id="prompt" aria-label="向 DeepSeek Harness 提问；可拖入编辑器标签页作为上下文" placeholder="向 DeepSeek Harness 提问… 也可拖入编辑器标签页作为上下文"></textarea><div class="composer-actions"><details id="context-picker" class="dropdown"><summary id="attach" class="control" title="选择上下文来源"><span aria-hidden="true">＋</span><span class="control-label">上下文</span><span aria-hidden="true">⌄</span></summary><div class="dropdown-menu" data-wide="true"><button class="menu-choice" data-context="selection">当前选区<small>代码片段</small></button><button class="menu-choice" data-context="document">当前文件<small>完整文件</small></button><button class="menu-choice" data-context="diagnostics">当前文件 Problems<small>此文件的错误和警告</small></button><button class="menu-choice" data-context="external">选择文件或文件夹<small>最多 16 项、100K 文本</small></button><button class="menu-choice" data-context="terminal">当前终端输出<small>扩展启动后捕获的输出</small></button></div></details><details id="model-picker" class="dropdown"><summary id="model" class="control" title="选择模型"><span id="model-dot" class="model-dot" data-tone="flash"></span><span id="model-label">DeepSeek V4 Flash</span><span aria-hidden="true">⌄</span></summary><div id="model-options" class="dropdown-menu"></div></details><button id="snapshot" class="control" title="是否为本轮文件变更保存版本副本" aria-label="切换版本存档">存档：关</button><details id="context-meter" class="dropdown"><summary class="control" title="当前上下文占用"><span id="context-ring">0%</span><span aria-hidden="true">⌄</span></summary><div class="dropdown-menu"><span id="context-detail" class="context-detail">当前上下文：暂无用量</span><button id="compact" class="menu-choice">压缩上下文<small>摘要较早的对话历史</small></button></div></details><span class="spacer"></span><button id="stop" class="control" title="停止当前任务" aria-label="停止当前任务">■</button><button id="send" title="发送" aria-label="发送">↑</button></div></div></section>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi(); const messages = new Map(); let todos = []; let usage;
-    const conversation = document.getElementById('conversation'); const empty = document.getElementById('empty'); const prompt = document.getElementById('prompt'); const attachments = document.getElementById('attachments'); const status = document.getElementById('status'); const stateDot = document.getElementById('state-dot'); const topbar = document.getElementById('topbar'); const keyWarning = document.getElementById('key-warning'); const send = document.getElementById('send'); const stop = document.getElementById('stop'); const model = document.getElementById('model'); const modelPicker = document.getElementById('model-picker'); const modelLabel = document.getElementById('model-label'); const modelDot = document.getElementById('model-dot'); const contextPicker = document.getElementById('context-picker'); const snapshot = document.getElementById('snapshot'); const changesDock = document.getElementById('changes-dock'); const changes = document.getElementById('changes');
-    const history = document.createElement('button'); history.className = 'icon-button'; history.id = 'history'; history.title = 'Session history'; history.setAttribute('aria-label', 'Session history'); history.textContent = '◴'; document.getElementById('new').before(history);
-    const folderChoice = document.createElement('button'); folderChoice.className = 'menu-choice'; folderChoice.dataset.context = 'folder'; folderChoice.textContent = 'Attach folder'; const folderHint = document.createElement('small'); folderHint.textContent = 'up to 30 files'; folderChoice.append(folderHint); contextPicker.querySelector('.dropdown-menu').append(folderChoice);
+    const conversation = document.getElementById('conversation'); const trace = document.getElementById('trace'); const empty = document.getElementById('empty'); const prompt = document.getElementById('prompt'); const attachments = document.getElementById('attachments'); const status = document.getElementById('status'); const stateDot = document.getElementById('state-dot'); const topbar = document.getElementById('topbar'); const keyWarning = document.getElementById('key-warning'); const send = document.getElementById('send'); const stop = document.getElementById('stop'); const model = document.getElementById('model'); const modelPicker = document.getElementById('model-picker'); const modelOptions = document.getElementById('model-options'); const modelLabel = document.getElementById('model-label'); const modelDot = document.getElementById('model-dot'); const contextPicker = document.getElementById('context-picker'); const contextMeter = document.getElementById('context-meter'); const contextRing = document.getElementById('context-ring'); const contextDetail = document.getElementById('context-detail'); const snapshot = document.getElementById('snapshot'); const changesDock = document.getElementById('changes-dock'); const changes = document.getElementById('changes'); let configuredModels = []; let activePanel = 'conversation';
+    const history = document.createElement('button'); history.className = 'icon-button'; history.id = 'history'; history.title = '当前工程会话历史'; history.setAttribute('aria-label', '当前工程会话历史'); history.textContent = '◴'; document.getElementById('new').before(history);
+    const historyPanel = document.getElementById('history-panel'); const historyList = document.getElementById('history-list'); const historyClose = document.getElementById('history-close'); const historyNew = document.getElementById('history-new');
     const permissionPicker = document.createElement('details'); permissionPicker.className = 'dropdown'; permissionPicker.id = 'permission-picker'; const permissionSummary = document.createElement('summary'); permissionSummary.className = 'control'; permissionSummary.title = 'Harness access mode'; const permissionLabel = document.createElement('span'); permissionLabel.id = 'permission-label'; permissionSummary.append(permissionLabel, document.createTextNode('⌄')); const permissionMenu = document.createElement('div'); permissionMenu.className = 'dropdown-menu'; [['read-only', 'Read only', 'No file writes'], ['workspace-write', 'Workspace write', 'Workspace + approved temp'], ['danger-full-access', 'All access', 'No approval prompts']].forEach(function(item) { const choice = document.createElement('button'); choice.className = 'menu-choice'; choice.dataset.permission = item[0]; choice.append(document.createTextNode(item[1])); const hint = document.createElement('small'); hint.textContent = item[2]; choice.append(hint); permissionMenu.append(choice); }); permissionPicker.append(permissionSummary, permissionMenu); modelPicker.after(permissionPicker);
+    const effortPicker = document.createElement('details'); effortPicker.className = 'dropdown'; effortPicker.id = 'effort-picker'; const effortSummary = document.createElement('summary'); effortSummary.className = 'control'; effortSummary.title = 'Model reasoning level'; const effortLabel = document.createElement('span'); effortLabel.id = 'effort-label'; effortSummary.append(effortLabel, document.createTextNode('⌄')); const effortMenu = document.createElement('div'); effortMenu.className = 'dropdown-menu'; [['auto', 'Auto', '由模型决定'], ['low', 'Low', '较快'], ['medium', 'Medium', '平衡'], ['high', 'High', '更深入'], ['max', 'Max', '模型支持时的最大推理']].forEach(function(item) { const choice = document.createElement('button'); choice.className = 'menu-choice'; choice.dataset.effort = item[0]; choice.append(document.createTextNode(item[1])); const hint = document.createElement('small'); hint.textContent = item[2]; choice.append(hint); effortMenu.append(choice); }); effortPicker.append(effortSummary, effortMenu); permissionPicker.after(effortPicker);
     function post(type, content) { vscode.postMessage(content === undefined ? { type: type } : { type: type, content: content }); }
     function line(text, last) { const normalized = text.trimEnd(); const index = normalized.lastIndexOf('\\n'); return last ? normalized.slice(index + 1) : text.slice(0, text.indexOf('\\n') === -1 ? text.length : text.indexOf('\\n')); }
     function toolSymbol(title) { const value = (title || '').toLowerCase(); if (value.includes('read') || value.includes('读取')) return '◫'; if (value.includes('search') || value.includes('查找')) return '⌕'; if (value.includes('write') || value.includes('edit') || value.includes('写入') || value.includes('编辑')) return '✎'; if (value.includes('bash') || value.includes('pwsh') || value.includes('shell')) return '⌁'; return '✦'; }
@@ -890,22 +1088,32 @@ function html(webview: vscode.Webview): string {
       }
     }
     function renderMessage(message) { const node = document.createElement('article'); node.className = 'message ' + message.role; node.dataset.id = message.id; if (message.role === 'user') { node.textContent = message.text; return node; } if (message.role === 'assistant') { markdownText(node, message.text); return node; } if (message.role === 'thinking') { const details = document.createElement('details'); details.className = 'think'; details.dataset.state = message.state || 'ok'; if (message.state === 'running') details.open = true; const summary = document.createElement('summary'); const chevron = document.createElement('span'); chevron.className = 'disclosure'; chevron.textContent = '›'; const icon = document.createElement('span'); icon.className = 'think-icon'; icon.textContent = '◌'; const title = document.createElement('span'); title.className = 'think-title'; title.textContent = 'Think'; const sep = document.createElement('span'); sep.className = 'row-separator'; const glimpse = document.createElement('span'); glimpse.className = 'row-summary'; glimpse.textContent = line(message.text, message.state === 'running'); summary.append(chevron, icon, title, sep, glimpse); const body = document.createElement('div'); body.className = 'think-body'; body.textContent = message.text; details.append(summary, body); node.append(details); return node; } if (message.role === 'tool') { const details = document.createElement('details'); details.className = 'tool'; details.dataset.state = message.state || 'ok'; if (message.state === 'running') details.open = true; const summary = document.createElement('summary'); const chevron = document.createElement('span'); chevron.className = 'disclosure'; chevron.textContent = '›'; const icon = document.createElement('span'); icon.className = 'tool-icon'; icon.textContent = toolSymbol(message.title); const title = document.createElement('span'); title.className = 'tool-title'; title.textContent = message.title || 'Tool'; const state = document.createElement('span'); state.className = 'tool-state'; summary.append(chevron, icon, title, state); details.append(summary); if (message.text) { const output = document.createElement('pre'); output.className = 'tool-output'; output.textContent = message.text; details.append(output); } node.append(details); return node; } const title = document.createElement('div'); title.className = 'error-title'; title.textContent = message.title || 'DeepSeek Harness'; const body = document.createElement('div'); body.textContent = message.text; node.append(title, body); return node; }
-    function renderMessages() { conversation.replaceChildren(); messages.forEach(function(message) { conversation.append(renderMessage(message)); }); empty.hidden = messages.size > 0; conversation.lastElementChild && conversation.lastElementChild.scrollIntoView({ block: 'end' }); }
+    function renderMessages() { conversation.replaceChildren(); messages.forEach(function(message) { conversation.append(renderMessage(message)); }); empty.hidden = messages.size > 0 || activePanel === 'trace'; conversation.lastElementChild && conversation.lastElementChild.scrollIntoView({ block: 'end' }); renderTrace(); renderTelemetry(); }
+    function renderTrace() { trace.replaceChildren(); const legend = document.createElement('div'); legend.className = 'trace-legend'; legend.textContent = 'Duration   Turns   Calls   ·   轨迹以本次会话实际事件为准'; trace.append(legend); messages.forEach(function(message) { const row = document.createElement('div'); row.className = 'trace-row'; row.dataset.role = message.role; const type = document.createElement('span'); type.className = 'trace-type'; type.dataset.role = message.role; type.textContent = message.role === 'thinking' ? 'THINK' : message.role.toUpperCase(); const body = document.createElement('div'); body.className = 'trace-content'; body.textContent = (message.title ? message.title + ' · ' : '') + line(message.text || '', false); const bar = document.createElement('span'); bar.className = 'trace-bar'; body.append(bar); row.append(type, body); trace.append(row); }); }
+    function renderSessionHistory(sessions) { historyList.replaceChildren(); const list = Array.isArray(sessions) ? sessions : []; if (list.length === 0) { const emptyHistory = document.createElement('div'); emptyHistory.className = 'history-empty'; emptyHistory.textContent = '当前工程文件夹还没有已保存的 Harness 会话。'; historyList.append(emptyHistory); } else { list.forEach(function(session) { const button = document.createElement('button'); button.className = 'history-session'; button.type = 'button'; button.dataset.sessionId = session.id; const title = document.createElement('span'); title.className = 'history-title'; title.textContent = session.title || '未命名会话'; const time = document.createElement('span'); time.className = 'history-time'; time.textContent = session.updatedAt || '最近会话'; button.append(title, time); historyList.append(button); }); } historyPanel.hidden = false; }
     function renderAttachments(items) { attachments.replaceChildren(); items.forEach(function(item) { const chip = document.createElement('span'); chip.className = 'attachment'; const label = document.createElement('span'); label.className = 'attachment-label'; label.textContent = '⌁ ' + item.label; label.title = item.label; const remove = document.createElement('button'); remove.className = 'attachment-remove'; remove.type = 'button'; remove.title = 'Remove context'; remove.setAttribute('aria-label', 'Remove ' + item.label); remove.textContent = '×'; remove.addEventListener('click', function() { post('removeAttachment', item.id); }); chip.append(label, remove); attachments.append(chip); }); }
     function renderTodos() { const dock = document.getElementById('todo-dock'); const list = document.getElementById('todos'); const count = document.getElementById('todo-count'); list.replaceChildren(); count.textContent = String(todos.length); dock.hidden = todos.length === 0; todos.forEach(function(todo) { const row = document.createElement('div'); row.className = 'todo'; row.dataset.status = todo.status; const symbol = document.createElement('span'); symbol.className = 'todo-symbol'; symbol.textContent = todo.status === 'completed' ? '✓' : (todo.status === 'in_progress' ? '◉' : '○'); const text = document.createElement('span'); text.textContent = todo.content; row.append(symbol, text); list.append(row); }); }
     function renderChanges(items) { const count = document.getElementById('changes-count'); changes.replaceChildren(); count.textContent = String(items.length); changesDock.hidden = items.length === 0; items.forEach(function(item) { const row = document.createElement('div'); row.className = 'change-row'; const kind = document.createElement('span'); kind.className = 'change-kind'; kind.dataset.kind = item.kind; kind.textContent = item.kind === 'created' ? 'A' : (item.kind === 'deleted' ? 'D' : 'M'); const open = document.createElement('button'); open.className = 'change-open'; open.textContent = item.label; open.title = item.canCompare ? '在源文件中显示行级修改' : '打开 ' + item.label; open.addEventListener('click', function() { post('openChangedFile', item.uri); }); row.append(kind, open); const stats = document.createElement('button'); stats.className = 'change-stats'; stats.title = item.canCompare ? '在源文件中显示行级修改' : '打开文件'; const added = document.createElement('span'); added.className = 'added'; added.textContent = '+' + String(item.addedLines || 0); const removed = document.createElement('span'); removed.className = 'removed'; removed.textContent = '−' + String(item.removedLines || 0); stats.append(added, removed); stats.addEventListener('click', function() { post('openChangedFile', item.uri); }); row.append(stats); if (item.canUndo) { const undo = document.createElement('button'); undo.className = 'undo-change'; undo.textContent = '撤销'; undo.title = '仅撤销该文件的本轮修改'; undo.addEventListener('click', function() { post('undoChangedFile', item.uri); }); row.append(undo); } if (item.archiveAfter) { const archive = document.createElement('button'); archive.className = 'archive-open'; archive.textContent = '存档'; archive.title = item.archiveBefore ? '对比本轮存档' : '打开本轮存档'; archive.addEventListener('click', function() { post('openArchive', { before: item.archiveBefore, after: item.archiveAfter, label: item.label }); }); row.append(archive); } changes.append(row); }); }
-    function renderUsage() { const stats = document.getElementById('stats'); if (!usage) { stats.textContent = ''; return; } stats.textContent = '输入 ' + compact(usage.inputTokens) + ' tokens  |  输出 ' + compact(usage.outputTokens) + ' tokens'; }
+    function renderUsage() { const limit = 128000; const inputTokens = usage ? usage.inputTokens : 0; const percent = Math.min(100, Math.round(inputTokens / limit * 100)); contextRing.textContent = String(percent) + '%'; contextRing.style.borderColor = percent >= 85 ? 'var(--vscode-testing-iconFailed)' : (percent >= 60 ? 'var(--vscode-charts-yellow, #d7ba7d)' : 'var(--vscode-progressBar-background)'); contextDetail.textContent = usage ? '当前上下文 ' + compact(inputTokens) + ' / ' + compact(limit) + ' tokens（按最近一次模型用量估算）' : '当前上下文：暂无用量'; renderTelemetry(); }
+    function renderTelemetry() { const list = Array.from(messages.values()); const turns = list.filter(function(message) { return message.role === 'user'; }).length; const tools = list.filter(function(message) { return message.role === 'tool'; }).length; const input = usage ? compact(usage.inputTokens) : '0'; const output = usage ? compact(usage.outputTokens) : '0'; document.getElementById('stats').textContent = String(turns) + ' 轮 · ' + String(list.length) + ' 步  |  工具调用 ' + String(tools) + '  |  ' + (usage ? 'LLM · 输入/输出已统计' : 'LLM —') + '  |  输入 ' + input + ' tok · 输出 ' + output + ' tok'; }
     function compact(value) { if (value < 1000) return String(value); if (value < 1000000) return (Math.round(value / 100) / 10) + 'K'; return (Math.round(value / 100000) / 10) + 'M'; }
-    function setStatus(value) { const state = value.state || 'stopped'; stateDot.dataset.state = state; status.textContent = value.detail || state; const active = state === 'starting' || state === 'running'; topbar.dataset.running = active ? 'true' : 'false'; send.disabled = active; prompt.disabled = active; modelPicker.dataset.disabled = active ? 'true' : 'false'; permissionPicker.dataset.disabled = active ? 'true' : 'false'; if (active) { modelPicker.open = false; permissionPicker.open = false; } stop.disabled = state === 'stopped' || state === 'error'; }
-    function setModel(value) { const normalized = value === 'deepseek-v4-pro' ? value : 'deepseek-v4-flash'; modelLabel.textContent = normalized === 'deepseek-v4-pro' ? 'V4-Pro' : 'Flash'; modelDot.dataset.model = normalized; model.title = normalized === 'deepseek-v4-pro' ? '当前模型：V4-Pro' : '当前模型：Flash'; }
+    function setStatus(value) { const state = value.state || 'stopped'; stateDot.dataset.state = state; status.textContent = value.detail || state; const active = state === 'starting' || state === 'running'; topbar.dataset.running = active ? 'true' : 'false'; send.disabled = active; prompt.disabled = active; modelPicker.dataset.disabled = active ? 'true' : 'false'; permissionPicker.dataset.disabled = active ? 'true' : 'false'; effortPicker.dataset.disabled = active ? 'true' : 'false'; if (active) { modelPicker.open = false; permissionPicker.open = false; effortPicker.open = false; } stop.disabled = state === 'stopped' || state === 'error'; }
+    function sameModel(left, right) { return left && right && left.provider === right.provider && left.model === right.model; }
+    function setModel(selection) { const option = configuredModels.find(function(item) { return sameModel(item, selection); }) || configuredModels[0]; if (!option) return; modelLabel.textContent = option.label; modelDot.dataset.tone = option.tone; model.title = '当前模型：' + option.label; effortPicker.hidden = !(option.provider === 'deepseek-official' && option.model === 'deepseek-v4-pro'); }
+    function renderModelOptions(options) { configuredModels = Array.isArray(options) ? options : []; modelOptions.replaceChildren(); configuredModels.forEach(function(option) { const choice = document.createElement('button'); choice.className = 'menu-choice'; choice.dataset.provider = option.provider; choice.dataset.model = option.model; const dot = document.createElement('span'); dot.className = 'model-dot'; dot.dataset.tone = option.tone; const label = document.createElement('span'); label.textContent = option.label; const description = document.createElement('small'); description.textContent = option.description; choice.append(dot, label, description); modelOptions.append(choice); }); const manage = document.createElement('button'); manage.className = 'menu-choice model-manage'; manage.dataset.action = 'configure-providers'; manage.textContent = '配置模型提供方…'; const hint = document.createElement('small'); hint.textContent = 'OpenAI、Claude、Gemini、兼容 API'; manage.append(hint); modelOptions.append(manage); }
     function setPermission(value) { const names = { 'read-only': 'Read only', 'workspace-write': 'Workspace write', 'danger-full-access': 'All access' }; const normalized = Object.prototype.hasOwnProperty.call(names, value) ? value : 'workspace-write'; permissionLabel.textContent = names[normalized]; permissionSummary.title = 'Harness access mode: ' + names[normalized]; permissionPicker.dataset.mode = normalized; }
+    function setReasoningEffort(value) { const names = { auto: 'Auto', low: 'Low', medium: 'Medium', high: 'High', max: 'Max' }; const normalized = Object.prototype.hasOwnProperty.call(names, value) ? value : 'auto'; effortLabel.textContent = names[normalized]; effortSummary.title = 'Model reasoning level: ' + names[normalized]; }
     function setVersionSnapshots(enabled) { snapshot.dataset.enabled = enabled ? 'true' : 'false'; snapshot.textContent = enabled ? '存档：开' : '存档：关'; snapshot.title = enabled ? '本轮变更将保存版本副本' : '本轮变更不保存版本副本'; }
     function addMessage(message) { messages.set(message.id, message); renderMessages(); }
-    function closeMenus(except) { [contextPicker, modelPicker, permissionPicker].forEach(function(picker) { if (picker !== except) picker.open = false; }); }
-    document.getElementById('new').addEventListener('click', function() { post('newSession'); }); history.addEventListener('click', function() { post('sessionHistory'); }); document.getElementById('stop').addEventListener('click', function() { post('stopRunner'); }); document.getElementById('configure').addEventListener('click', function() { post('configureApiKey'); }); contextPicker.addEventListener('toggle', function() { if (contextPicker.open) closeMenus(contextPicker); }); modelPicker.addEventListener('toggle', function() { if (modelPicker.open) closeMenus(modelPicker); }); contextPicker.addEventListener('click', function(event) { const target = event.target instanceof Element ? event.target.closest('[data-context]') : undefined; if (!target) return; contextPicker.open = false; post('addContext', target.dataset.context); }); modelPicker.addEventListener('click', function(event) { const target = event.target instanceof Element ? event.target.closest('button[data-model]') : undefined; if (!target) return; modelPicker.open = false; post('setModel', target.dataset.model); }); document.addEventListener('click', function(event) { const target = event.target; if (target instanceof Node && !contextPicker.contains(target) && !modelPicker.contains(target)) closeMenus(); }); snapshot.addEventListener('click', function() { post('toggleVersionSnapshots'); }); send.addEventListener('click', function() { const value = prompt.value; if (value.trim()) { prompt.value = ''; post('prompt', value); } }); prompt.addEventListener('keydown', function(event) { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send.click(); } });
+    function switchPanel(panel) { activePanel = panel === 'trace' ? 'trace' : 'conversation'; conversation.hidden = activePanel !== 'conversation'; trace.hidden = activePanel !== 'trace'; document.querySelectorAll('.chat-tab').forEach(function(tab) { tab.dataset.active = tab.dataset.panel === activePanel ? 'true' : 'false'; }); empty.hidden = messages.size > 0 || activePanel === 'trace'; }
+    function closeMenus(except) { [contextPicker, modelPicker, permissionPicker, effortPicker, contextMeter].forEach(function(picker) { if (picker !== except) picker.open = false; }); }
+    document.getElementById('new').addEventListener('click', function() { historyPanel.hidden = true; post('newSession'); }); history.addEventListener('click', function() { post('sessionHistory'); }); historyClose.addEventListener('click', function() { historyPanel.hidden = true; }); historyNew.addEventListener('click', function() { historyPanel.hidden = true; post('newSession'); }); historyList.addEventListener('click', function(event) { const target = event.target instanceof Element ? event.target.closest('button[data-session-id]') : undefined; if (!target) return; historyPanel.hidden = true; post('resumeSession', target.dataset.sessionId); }); document.getElementById('stop').addEventListener('click', function() { post('stopRunner'); }); document.querySelectorAll('.chat-tab').forEach(function(tab) { tab.addEventListener('click', function() { switchPanel(tab.dataset.panel); }); }); contextPicker.addEventListener('toggle', function() { if (contextPicker.open) closeMenus(contextPicker); }); modelPicker.addEventListener('toggle', function() { if (modelPicker.open) closeMenus(modelPicker); }); contextMeter.addEventListener('toggle', function() { if (contextMeter.open) closeMenus(contextMeter); }); document.getElementById('compact').addEventListener('click', function() { contextMeter.open = false; post('compactContext'); }); contextPicker.addEventListener('click', function(event) { const target = event.target instanceof Element ? event.target.closest('[data-context]') : undefined; if (!target) return; contextPicker.open = false; post('addContext', target.dataset.context); }); modelPicker.addEventListener('click', function(event) { const target = event.target instanceof Element ? event.target.closest('button[data-provider][data-model], button[data-action]') : undefined; if (!target) return; modelPicker.open = false; if (target.dataset.action === 'configure-providers') post('configureProviders'); else post('setModel', { provider: target.dataset.provider, model: target.dataset.model }); }); document.addEventListener('click', function(event) { const target = event.target; if (target instanceof Node && !contextPicker.contains(target) && !modelPicker.contains(target) && !contextMeter.contains(target)) closeMenus(); }); snapshot.addEventListener('click', function() { post('toggleVersionSnapshots'); }); send.addEventListener('click', function() { const value = prompt.value; if (value.trim()) { prompt.value = ''; post('prompt', value); } }); prompt.addEventListener('keydown', function(event) { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send.click(); } });
     permissionPicker.addEventListener('toggle', function() { if (permissionPicker.open) closeMenus(permissionPicker); }); permissionPicker.addEventListener('click', function(event) { const target = event.target instanceof Element ? event.target.closest('button[data-permission]') : undefined; if (!target) return; permissionPicker.open = false; post('setPermissionMode', target.dataset.permission); }); document.addEventListener('click', function(event) { const target = event.target; if (target instanceof Node && !permissionPicker.contains(target)) permissionPicker.open = false; });
-    prompt.addEventListener('dragover', function(event) { event.preventDefault(); prompt.dataset.drop = 'true'; }); prompt.addEventListener('dragleave', function() { delete prompt.dataset.drop; }); prompt.addEventListener('drop', function(event) { event.preventDefault(); delete prompt.dataset.drop; const files = Array.from(event.dataTransfer.files).slice(0, 8); Promise.all(files.map(function(file) { return new Promise(function(resolve) { const reader = new FileReader(); reader.onload = function() { const result = typeof reader.result === 'string' ? reader.result : ''; const comma = result.indexOf(','); resolve({ name: file.name, mediaType: file.type, data: comma >= 0 ? result.slice(comma + 1) : '' }); }; reader.onerror = function() { resolve(undefined); }; reader.readAsDataURL(file); }); })).then(function(items) { post('droppedFiles', items.filter(Boolean)); }); });
-    window.addEventListener('message', function(event) { const message = event.data; if (message.type === 'snapshot') { messages.clear(); message.messages.forEach(function(item) { messages.set(item.id, item); }); todos = message.todos || []; usage = message.usage; renderMessages(); renderAttachments(message.attachments || []); renderChanges(message.workspaceChanges || []); renderTodos(); renderUsage(); setModel(message.model); setPermission(message.permissionMode); setVersionSnapshots(message.versionSnapshots === true); setStatus(message.status); keyWarning.hidden = message.apiKeyConfigured; } if (message.type === 'message' || message.type === 'replaceMessage') addMessage(message.message); if (message.type === 'status') setStatus(message.status); if (message.type === 'todos') { todos = message.todos || []; renderTodos(); } if (message.type === 'usage') { usage = message.usage; renderUsage(); } if (message.type === 'clearAttachments') renderAttachments([]); if (message.type === 'notice') status.textContent = message.text; });
+    effortPicker.addEventListener('toggle', function() { if (effortPicker.open) closeMenus(effortPicker); }); effortPicker.addEventListener('click', function(event) { const target = event.target instanceof Element ? event.target.closest('button[data-effort]') : undefined; if (!target) return; effortPicker.open = false; post('setReasoningEffort', target.dataset.effort); }); document.addEventListener('click', function(event) { const target = event.target; if (target instanceof Node && !effortPicker.contains(target)) effortPicker.open = false; });
+    function editorTabUris(transfer) { const values = []; Array.from(transfer.types || []).forEach(function(type) { if (type === 'Files') return; try { const value = transfer.getData(type); if (value) values.push(value); } catch (_) {} }); const found = []; values.forEach(function(value) { value.split(/\r?\n/).forEach(function(line) { const uri = line.trim(); if (/^(?:file|untitled|vscode-remote):/i.test(uri)) found.push(uri); }); }); return Array.from(new Set(found)).slice(0, 8); }
+    function readDroppedFiles(transfer) { const files = Array.from(transfer.files || []).slice(0, 8); return Promise.all(files.map(function(file) { return new Promise(function(resolve) { const reader = new FileReader(); reader.onload = function() { const result = typeof reader.result === 'string' ? reader.result : ''; const comma = result.indexOf(','); resolve({ name: file.name, mediaType: file.type, data: comma >= 0 ? result.slice(comma + 1) : '' }); }; reader.onerror = function() { resolve(undefined); }; reader.readAsDataURL(file); }); })); }
+    prompt.addEventListener('dragover', function(event) { event.preventDefault(); prompt.dataset.drop = 'true'; }); prompt.addEventListener('dragleave', function() { delete prompt.dataset.drop; }); prompt.addEventListener('drop', function(event) { event.preventDefault(); delete prompt.dataset.drop; const uris = editorTabUris(event.dataTransfer); if (uris.length) post('droppedUris', uris); readDroppedFiles(event.dataTransfer).then(function(items) { const files = items.filter(Boolean); if (files.length) post('droppedFiles', files); }); });
+    window.addEventListener('message', function(event) { const message = event.data; if (message.type === 'snapshot') { messages.clear(); message.messages.forEach(function(item) { messages.set(item.id, item); }); todos = message.todos || []; usage = message.usage; renderMessages(); renderAttachments(message.attachments || []); renderChanges(message.workspaceChanges || []); renderTodos(); renderUsage(); renderModelOptions(message.modelOptions); setModel(message.modelSelection); setReasoningEffort(message.reasoningEffort); setPermission(message.permissionMode); setVersionSnapshots(message.versionSnapshots === true); setStatus(message.status); keyWarning.hidden = message.apiKeyConfigured; } if (message.type === 'message' || message.type === 'replaceMessage') addMessage(message.message); if (message.type === 'status') setStatus(message.status); if (message.type === 'todos') { todos = message.todos || []; renderTodos(); } if (message.type === 'usage') { usage = message.usage; renderUsage(); } if (message.type === 'sessionHistory') renderSessionHistory(message.sessions); if (message.type === 'clearAttachments') renderAttachments([]); if (message.type === 'notice') status.textContent = message.text; });
     window.addEventListener('message', function(event) { const message = event.data; if (message.type === 'attachments') renderAttachments(message.attachments || []); if (message.type === 'workspaceChanges') renderChanges(message.changes || []); });
   </script>
 </body>

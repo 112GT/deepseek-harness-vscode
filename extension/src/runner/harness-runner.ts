@@ -5,7 +5,7 @@ import * as vscode from 'vscode'
 import type { PromptAttachment, PromptRequest, RunnerEvent } from './protocol'
 import { JsonRpcRuntime, type JsonRpcNotification } from './json-rpc-runtime'
 import type { HarnessSourceLocator, HarnessSourceStatus } from './source-locator'
-import type { HarnessCapabilitiesSnapshot, HarnessPreset, HarnessSkill, RunnerHistoryEntry, RunnerSessionSummary } from './runner'
+import type { HarnessCapabilitiesSnapshot, HarnessPreset, HarnessSkill, RunnerCommandResult, RunnerHistoryEntry, RunnerSessionSummary } from './runner'
 
 const SDK_RUNTIME = ['packages', 'examples', 'jsonrpc-demo', 'lib', 'bin.js'] as const
 const SDK_CONFIG = ['examples', 'jsonrpc-agent', 'cordis.yml'] as const
@@ -93,6 +93,10 @@ export class HarnessRunner implements vscode.Disposable {
     await this.stop()
   }
 
+  async compactContext(): Promise<RunnerCommandResult> {
+    throw new Error('Context compression requires the local Harness Host transport.')
+  }
+
   /** Builds the copied Harness checkout when the published SDK entry is absent. */
   async prepare(): Promise<void> {
     const source = await this.requireSource()
@@ -141,6 +145,10 @@ export class HarnessRunner implements vscode.Disposable {
   }
 
   async openPresetDocument(_id: string): Promise<void> {
+    throw new Error('Agent presets require the local Harness Host transport.')
+  }
+
+  async removePreset(_id: string): Promise<void> {
     throw new Error('Agent presets require the local Harness Host transport.')
   }
 
